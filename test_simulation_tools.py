@@ -19,13 +19,13 @@ def test_data_sources():
 
     # Test yfinance
     try:
-        import yfinance as yf
+        from data_sources.alpaca_client import AlpacaClient
 
-        ticker = yf.Ticker("AAPL")
-        data = ticker.history(period="5d")
-        print(f"✅ YFinance: Retrieved {len(data)} days of AAPL data")
+        client = AlpacaClient()
+        data = client.get_market_data_for_symbol("AAPL", "5d")
+        print(f"✅ Alpaca: Retrieved {len(data)} days of AAPL data")
     except Exception as e:
-        print(f"❌ YFinance failed: {e}")
+        print(f"❌ Alpaca failed: {e}")
 
     # Test FRED API
     try:

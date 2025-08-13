@@ -47,13 +47,13 @@ def test_core_imports():
 def test_market_data_fetch():
     """Test basic market data fetching"""
     try:
-        import yfinance as yf
+        from data_sources.alpaca_client import AlpacaClient
 
-        ticker = yf.Ticker("AAPL")
-        data = ticker.history(period="5d")
+        client = AlpacaClient()
+        data = client.get_market_data_for_symbol("AAPL", "5d")
 
         assert not data.empty, "Market data should not be empty"
-        assert "Close" in data.columns, "Market data should have Close column"
+        assert "close" in data.columns, "Market data should have close column"
         assert len(data) > 0, "Should have at least some data points"
 
     except Exception as e:
@@ -84,7 +84,7 @@ def test_portfolio_metrics_calculation():
     returns = pd.Series(np.random.randn(252) * 0.02)
 
     # Test basic calculations
-    total_return = (1 + returns).prod() - 1
+    total_return = float((1 + returns).prod() - 1)
     volatility = returns.std() * np.sqrt(252)
 
     assert isinstance(total_return, float), "Total return should be a float"

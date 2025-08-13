@@ -10,11 +10,16 @@ import numpy as np
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-import yfinance as yf
+from data_sources.alpaca_client import AlpacaClient
+from data_sources.sec_edgar_client import SECEdgarClient
+from data_sources.fred_client import FREDClient
+from data_sources.binance_client import BinanceClient
+from database.storage import DataStorage
 import os
 from fredapi import Fred
 import asyncio
 import time
+import requests
 
 
 def main():
@@ -200,52 +205,156 @@ def show_portfolio_analysis():
 
 
 def show_modal_compute():
-    """Show Modal compute orchestration status"""
-    st.header("⚡ Modal Compute Orchestration")
-
+    """Show Modal compute status and data ingestion jobs"""
+    st.header("🚀 Modal Compute & Data Status")
+    
+    try:
+        import requests
+        response = requests.get("http://localhost:8080/modal/jobs")
+        if response.status_code == 200:
+            job_data = response.json()
+            jobs = job_data.get("jobs", [])
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            active_jobs = len([j for j in jobs if j["status"] == "running"])
+            completed_today = len([j for j in jobs if j["status"] == "completed"])
+            failed_jobs = len([j for j in jobs if j["status"] == "failed"])
+            
+            with col1:
+                st.metric("Active Jobs", active_jobs)
+            
+            with col2:
+                st.metric("Completed", completed_today, "+2")
+            
+            with col3:
+                st.metric("Failed", failed_jobs)
+            
+            with col4:
+                st.metric("Total Jobs", len(jobs))
+            
+            st.subheader("Recent Data Ingestion Jobs")
+            
+            if jobs:
+                df = pd.DataFrame(jobs)
+                df = df[['job_id', 'job_type', 'status', 'created_at', 'completed_at', 'error_message']]
+                df.columns = ['Job ID', 'Type', 'Status', 'Created', 'Completed', 'Error']
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No jobs found. Start data ingestion to see job status here.")
+        else:
+            st.error("Failed to fetch job status from API")
+            
+    except Exception as e:
+        st.error(f"Error fetching Modal status: {str(e)}")
+    
+    st.subheader("📊 Data Sources Status")
+    
+    try:
+        response = requests.get("http://localhost:8080/data/sources")
+        if response.status_code == 200:
+            sources_data = response.json()
+            sources = sources_data.get("sources", [])
+            
+            for source in sources:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    status_icon = "✅" if source["available"] else "❌"
+                    st.write(f"{status_icon} **{source['source'].upper()}**")
+                    if not source["available"] and source.get("error_message"):
+                        st.caption(f"Error: {source['error_message']}")
+                with col2:
+                    if source["available"]:
+                        st.success("Available")
+                    else:
+                        st.error("Unavailable")
+        else:
+            st.error("Failed to fetch data source status")
+            
+    except Exception as e:
+        st.error(f"Error fetching data source status: {str(e)}")
+    
+    st.subheader("🗄️ Database Statistics")
+    
+    try:
+        response = requests.get("http://localhost:8080/data/stats")
+        if response.status_code == 200:
+            stats = response.json()
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Market Data", f"{stats['market_data_records']:,}")
+            
+            with col2:
+                st.metric("SEC Filings", f"{stats['sec_filings_records']:,}")
+            
+            with col3:
+                st.metric("Macro Data", f"{stats['macro_data_records']:,}")
+            
+            with col4:
+                st.metric("Crypto Data", f"{stats['crypto_data_records']:,}")
+            
+            st.metric("Total Records", f"{stats['total_records']:,}")
+            
+        else:
+            st.error("Failed to fetch database statistics")
+            
+    except Exception as e:
+        st.error(f"Error fetching database statistics: {str(e)}")
+    
+    st.subheader("🔄 Manual Data Ingestion")
+    
     col1, col2 = st.columns(2)
-
+    
     with col1:
-        st.subheader("🖥️ Active Jobs")
-
-        jobs = [
-            {"name": "Market Data Ingestion", "status": "Running", "workers": 12},
-            {"name": "Sentiment Analysis", "status": "Queued", "workers": 0},
-            {"name": "Portfolio Optimization", "status": "Completed", "workers": 8},
-            {"name": "Risk Simulation", "status": "Running", "workers": 24},
-        ]
-
-        for job in jobs:
-            status_color = {"Running": "🟢", "Queued": "🟡", "Completed": "✅"}
-            st.info(
-                f"{status_color[job['status']]} **{job['name']}**\nWorkers: {job['workers']}"
-            )
-
+        if st.button("Trigger Market Data Ingestion"):
+            try:
+                payload = {
+                    "symbols": ["AAPL", "GOOGL", "MSFT", "TSLA"],
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-01-15"
+                }
+                response = requests.post("http://localhost:8080/data/market", json=payload)
+                if response.status_code == 200:
+                    st.success("Market data ingestion job started!")
+                else:
+                    st.error("Failed to start market data ingestion")
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+    
     with col2:
-        st.subheader("📊 Compute Metrics")
-
-        # Mock compute metrics
-        st.metric("Active Workers", "44", "12")
-        st.metric("Jobs Completed", "1,247", "23")
-        st.metric("Compute Cost", "$12.34", "-$2.10")
-        st.metric("Data Processed", "2.3 TB", "0.4 TB")
-
-        # Show scaling visualization
-        hours = list(range(24))
-        workers = [np.random.randint(0, 50) for _ in hours]
-
-        fig = px.bar(x=hours, y=workers, title="Worker Scaling (24h)")
-        fig.update_layout(template="plotly_dark")
-        st.plotly_chart(fig, use_container_width=True)
+        if st.button("Trigger SEC Filings Ingestion"):
+            try:
+                payload = {
+                    "forms": ["10-K", "10-Q"],
+                    "limit": 50
+                }
+                response = requests.post("http://localhost:8080/data/sec", json=payload)
+                if response.status_code == 200:
+                    st.success("SEC filings ingestion job started!")
+                else:
+                    st.error("Failed to start SEC filings ingestion")
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
 
 
 def fetch_market_data(symbols):
     """Fetch real market data using yfinance"""
     try:
-        data = yf.download(symbols, period="30d", interval="1d")
+        client = AlpacaClient()
         if len(symbols) == 1:
-            # yfinance returns different structure for single vs multiple symbols
+            data = client.get_market_data_for_symbol(symbols[0], "1mo")
+            data = data.set_index('timestamp')
             data.columns = [f"{symbols[0]}_{col}" for col in data.columns]
+        else:
+            all_data = []
+            for symbol in symbols:
+                symbol_data = client.get_market_data_for_symbol(symbol, "1mo")
+                symbol_data = symbol_data.set_index('timestamp')
+                symbol_data.columns = [f"{symbol}_{col}" for col in symbol_data.columns]
+                all_data.append(symbol_data)
+            data = pd.concat(all_data, axis=1)
         return data
     except Exception as e:
         st.error(f"Error fetching data: {e}")
@@ -258,9 +367,9 @@ def create_price_chart(data, symbols):
 
     for symbol in symbols:
         if len(symbols) == 1:
-            close_col = f"{symbol}_Close"
+            close_col = f"{symbol}_close"
         else:
-            close_col = ("Close", symbol)
+            close_col = f"{symbol}_close"
 
         if close_col in data.columns:
             fig.add_trace(

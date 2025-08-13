@@ -48,6 +48,8 @@ statsmodels
 # Visualization & Dashboard
 streamlit
 plotly
+pgvector==0.2.4
+websockets==12.0
 matplotlib
 seaborn
 
