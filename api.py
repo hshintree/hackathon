@@ -6,7 +6,16 @@ Provides REST API endpoints for the trading agent.
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import yfinance as yf
+from data_sources.alpaca_client import AlpacaClient
+from data_sources.sec_edgar_client import SECEdgarClient
+from data_sources.fred_client import FREDClient
+from data_sources.binance_client import BinanceClient
+from database.storage import DataStorage
+from database.models import (
+    MarketDataRequest, SECFilingRequest, MacroDataRequest, 
+    CryptoDataRequest, DataIngestionJobRequest, HealthCheckResponse,
+    DatabaseStats, DataSourceStatus, DataSource
+)
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -35,28 +44,34 @@ class PortfolioMetrics(BaseModel):
 
 @app.get("/")
 async def root():
-    """Health check endpoint"""
-    return {
-        "message": "Autonomous Trading Agent API",
-        "status": "running",
-        "timestamp": datetime.now().isoformat(),
-    }
+    return {"message": "Autonomous Trading Agent API", "version": "2.0.0", "features": ["alpaca", "sec_edgar", "fred", "binance", "modal"]}
 
 
 @app.get("/health")
 async def health_check():
     """Detailed health check with API status"""
-    api_status = {
+    api_keys = {
         "finnhub": bool(os.getenv("FINNHUB_API_KEY")),
-        "alpaca": bool(os.getenv("APCA_API_KEY_ID")),
+        "alpaca": bool(os.getenv("APCA_API_KEY_ID") and os.getenv("APCA_API_SECRET_KEY")),
         "fred": bool(os.getenv("FRED_API_KEY")),
         "tavily": bool(os.getenv("TAVILY_API_KEY")),
+        "binance": bool(os.getenv("BINANCE_API_KEY"))
     }
-
+    
+    try:
+        storage = DataStorage()
+        with storage.get_session() as session:
+            session.execute("SELECT 1")
+        database_connected = True
+    except Exception:
+        database_connected = False
+    
     return {
         "status": "healthy",
-        "api_keys": api_status,
         "timestamp": datetime.now().isoformat(),
+        "api_keys": api_keys,
+        "database_connected": database_connected,
+        "modal_available": True
     }
 
 
@@ -64,7 +79,12 @@ async def health_check():
 async def get_market_data(request: StockRequest):
     """Fetch market data for given symbols"""
     try:
-        data = yf.download(request.symbols, period=request.period, interval="1d")
+        client = AlpacaClient()
+        symbols_str = ",".join(request.symbols) if len(request.symbols) > 1 else request.symbols[0]
+        df = client.get_market_data_for_symbol(symbols_str, request.period)
+        
+        # Convert to expected format
+        data = df.set_index('timestamp')
 
         if data.empty:
             raise HTTPException(status_code=404, detail="No data found for symbols")
@@ -75,16 +95,16 @@ async def get_market_data(request: StockRequest):
             if len(request.symbols) == 1:
                 symbol_data = data
             else:
-                symbol_data = data.xs(symbol, level=1, axis=1)
+                symbol_data = data
 
             result[symbol] = {
-                "prices": symbol_data["Close"].to_dict(),
-                "volumes": symbol_data["Volume"].to_dict(),
-                "latest_price": float(symbol_data["Close"].iloc[-1]),
+                "prices": symbol_data["close"].to_dict(),
+                "volumes": symbol_data["volume"].to_dict(),
+                "latest_price": float(symbol_data["close"].iloc[-1]),
                 "change_pct": float(
-                    (symbol_data["Close"].iloc[-1] / symbol_data["Close"].iloc[-2] - 1)
+                    (symbol_data["close"].iloc[-1] / symbol_data["close"].iloc[-2] - 1)
                     * 100
-                ),
+                ) if len(symbol_data) > 1 else 0.0,
             }
 
         return {
@@ -156,42 +176,202 @@ async def get_agent_status():
 
 @app.get("/modal/jobs")
 async def get_modal_jobs():
-    """Get status of Modal compute jobs"""
-    return {
-        "jobs": [
-            {
-                "name": "Market Data Ingestion",
-                "status": "running",
-                "workers": 12,
-                "duration": "00:45:23",
-                "cost": "$2.34",
-            },
-            {
-                "name": "Sentiment Analysis",
-                "status": "queued",
-                "workers": 0,
-                "duration": "00:00:00",
-                "cost": "$0.00",
-            },
-            {
-                "name": "Portfolio Optimization",
-                "status": "completed",
-                "workers": 8,
-                "duration": "00:12:45",
-                "cost": "$1.23",
-            },
-            {
-                "name": "Risk Simulation",
-                "status": "running",
-                "workers": 24,
-                "duration": "00:23:12",
-                "cost": "$4.56",
-            },
-        ],
-        "total_active_workers": 36,
-        "total_cost_today": "$8.13",
-        "timestamp": datetime.now().isoformat(),
-    }
+    """Get Modal job status"""
+    try:
+        storage = DataStorage()
+        with storage.get_session() as session:
+            from database.schema import DataIngestionJobs
+            jobs = session.query(DataIngestionJobs).order_by(
+                DataIngestionJobs.created_at.desc()
+            ).limit(20).all()
+            
+            job_list = []
+            for job in jobs:
+                job_list.append({
+                    "job_id": job.job_id,
+                    "job_type": job.job_type,
+                    "status": job.status,
+                    "created_at": job.created_at.isoformat() if job.created_at else None,
+                    "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+                    "error_message": job.error_message
+                })
+            
+            return {"status": "success", "jobs": job_list}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "jobs": []}
+
+
+@app.post("/data/market")
+async def ingest_market_data(request: MarketDataRequest):
+    """Trigger market data ingestion"""
+    try:
+        import requests
+        modal_url = "https://your-modal-app.modal.run/trigger_market_data_ingestion"
+        
+        response = requests.post(modal_url, json=request.dict())
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/data/sec")
+async def ingest_sec_data(request: SECFilingRequest):
+    """Trigger SEC filings ingestion"""
+    try:
+        import requests
+        modal_url = "https://your-modal-app.modal.run/trigger_sec_ingestion"
+        
+        response = requests.post(modal_url, json=request.dict())
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/data/macro")
+async def ingest_macro_data(request: MacroDataRequest):
+    """Trigger macro data ingestion"""
+    try:
+        import requests
+        modal_url = "https://your-modal-app.modal.run/trigger_macro_ingestion"
+        
+        response = requests.post(modal_url, json=request.dict())
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/data/crypto")
+async def ingest_crypto_data(request: CryptoDataRequest):
+    """Trigger crypto data ingestion"""
+    try:
+        import requests
+        modal_url = "https://your-modal-app.modal.run/trigger_crypto_ingestion"
+        
+        response = requests.post(modal_url, json=request.dict())
+        return response.json()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/data/sources")
+async def get_data_sources():
+    """Get available data sources and their status"""
+    sources = []
+    
+    try:
+        client = AlpacaClient()
+        sources.append(DataSourceStatus(source=DataSource.ALPACA, available=True))
+    except Exception as e:
+        sources.append(DataSourceStatus(source=DataSource.ALPACA, available=False, error_message=str(e)))
+    
+    try:
+        client = SECEdgarClient()
+        sources.append(DataSourceStatus(source=DataSource.SEC_EDGAR, available=True))
+    except Exception as e:
+        sources.append(DataSourceStatus(source=DataSource.SEC_EDGAR, available=False, error_message=str(e)))
+    
+    try:
+        client = FREDClient()
+        sources.append(DataSourceStatus(source=DataSource.FRED, available=True))
+    except Exception as e:
+        sources.append(DataSourceStatus(source=DataSource.FRED, available=False, error_message=str(e)))
+    
+    try:
+        client = BinanceClient()
+        sources.append(DataSourceStatus(source=DataSource.BINANCE, available=True))
+    except Exception as e:
+        sources.append(DataSourceStatus(source=DataSource.BINANCE, available=False, error_message=str(e)))
+    
+    return {"sources": sources}
+
+@app.get("/data/stats")
+async def get_database_stats():
+    """Get database statistics"""
+    try:
+        storage = DataStorage()
+        with storage.get_session() as session:
+            from database.schema import MarketData, SECFilings, MacroData, CryptoData
+            
+            market_count = session.query(MarketData).count()
+            sec_count = session.query(SECFilings).count()
+            macro_count = session.query(MacroData).count()
+            crypto_count = session.query(CryptoData).count()
+            
+            return DatabaseStats(
+                market_data_records=market_count,
+                sec_filings_records=sec_count,
+                macro_data_records=macro_count,
+                crypto_data_records=crypto_count,
+                total_records=market_count + sec_count + macro_count + crypto_count,
+                last_updated=datetime.now()
+            )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/sec/filings")
+async def get_sec_filings(tickers: str = None, forms: str = None, limit: int = 100):
+    """Get SEC filings from database"""
+    try:
+        storage = DataStorage()
+        ticker_list = tickers.split(",") if tickers else None
+        form_list = forms.split(",") if forms else None
+        
+        df = storage.get_sec_filings(ticker_list, form_list, limit)
+        
+        return {
+            "filings": df.to_dict("records"),
+            "count": len(df)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/macro/data")
+async def get_macro_data(series_ids: str, start_date: str = None, end_date: str = None):
+    """Get macro data from database"""
+    try:
+        from datetime import datetime, timedelta
+        
+        storage = DataStorage()
+        series_list = series_ids.split(",")
+        
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        df = storage.get_macro_data(series_list, start_dt, end_dt)
+        
+        return {
+            "data": df.to_dict("records"),
+            "count": len(df)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/crypto/data")
+async def get_crypto_data(symbols: str, start_date: str = None, end_date: str = None):
+    """Get crypto data from database"""
+    try:
+        from datetime import datetime, timedelta
+        
+        storage = DataStorage()
+        symbol_list = symbols.split(",")
+        
+        if not start_date:
+            start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
+        
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+        
+        df = storage.get_crypto_data(symbol_list, start_dt, end_dt)
+        
+        return {
+            "data": df.to_dict("records"),
+            "count": len(df)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
