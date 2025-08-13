@@ -1,0 +1,105 @@
+# Core Framework & Orchestration
+modal
+fastapi
+uvicorn
+pydantic
+
+# LLM & AI Framework
+openai
+anthropic
+langchain
+langchain-community
+langchain-openai
+llama-index
+
+# Financial Data APIs
+alpaca-py
+finnhub-python
+fredapi
+yfinance
+
+# Data Processing & Analysis
+pandas
+numpy
+scipy
+scikit-learn
+
+# Vector Database & Search
+chromadb
+faiss-cpu
+tavily-python
+
+# Database & Storage
+sqlalchemy
+psycopg2-binary
+redis
+pymongo
+
+# Web Scraping & Data Collection
+requests
+beautifulsoup4
+
+# Financial Analysis & Backtesting
+backtrader
+
+# Time Series & Forecasting
+statsmodels
+
+# Visualization & Dashboard
+streamlit
+plotly
+matplotlib
+seaborn
+
+# Async & Concurrency
+aiohttp
+
+# Utilities & Environment
+python-dotenv
+pyyaml
+click
+rich
+loguru
+schedule
+
+# Testing & Development
+pytest
+pytest-asyncio
+black
+
+# Security & Authentication
+cryptography
+PyJWT
+bcrypt
+
+# Performance & Monitoring
+psutil
+
+# Machine Learning & Deep Learning
+torch
+stable-baselines3
+tensorboard
+gymnasium
+
+# Optimization
+cvxpy
+
+# Open Source Financial Tools & Simulation
+finrl
+vectorbt
+quantstats
+zipline-reloaded
+pyfolio-reloaded
+ffn
+riskfolio-lib
+
+# Additional Financial Analysis
+dash
+selenium
+newsapi-python
+tweepy
+praw
+arch
+prophet
+pmdarima
+alpaca-trade-api
