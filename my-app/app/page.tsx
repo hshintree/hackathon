@@ -9,6 +9,7 @@ import AgentNetwork from "./agent-network/page"
 import StrategyOperations from "./strategy-operations/page"
 import MarketIntelligence from "./market-intelligence/page"
 import SystemHealth from "./system-health/page"
+import { useSystemStatus, usePortfolioData, useAgentStatus, useStrategyData, useMarketStatus } from "@/lib/hooks"
 
 // BACKEND INTEGRATION: Main Dashboard Component
 // This component orchestrates the entire autonomous trading system
@@ -31,42 +32,22 @@ export default function AutonomousTradingDashboard() {
   const [activeSection, setActiveSection] = useState("dashboard")
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
-  // MOCK DATA - REPLACE WITH REAL API CALLS
-  // Connect to your FastAPI backend endpoints:
-  // - systemStatus should come from GET /api/system/status
-  // - Use WebSocket connection for real-time updates
-  const [systemStatus, setSystemStatus] = useState({
-    totalPnL: 0, // REPLACE: Get from Alpaca API portfolio.unrealized_pl + realized_pl
-    activeAgents: 4, // REPLACE: Count from your agent management system
-    runningStrategies: 0, // REPLACE: Count from active strategy database table
-    marketStatus: "OPEN", // REPLACE: Get from Alpaca API market calendar
-  })
+  // REAL BACKEND INTEGRATION - Using custom hooks for API calls
+  const { systemStatus, loading: systemLoading, error: systemError } = useSystemStatus()
+  const { portfolioData, loading: portfolioLoading } = usePortfolioData()
+  const { agentStatus, loading: agentLoading } = useAgentStatus()
+  const { strategyData, loading: strategyLoading } = useStrategyData()
+  const { marketStatus, loading: marketLoading } = useMarketStatus()
 
-  useEffect(() => {
-    // BACKEND INTEGRATION: Replace this mock interval with WebSocket connection
-    //
-    // IMPLEMENTATION STEPS:
-    // 1. Create WebSocket connection to your FastAPI backend
-    // 2. Listen for real-time updates from your trading system
-    // 3. Update state based on actual portfolio changes
-    //
-    // EXAMPLE WEBSOCKET SETUP:
-    // const ws = new WebSocket('ws://localhost:8000/ws/system')
-    // ws.onmessage = (event) => {
-    //   const data = JSON.parse(event.data)
-    //   setSystemStatus(data)
-    // }
-
-    const interval = setInterval(() => {
-      // REMOVE THIS MOCK CODE - Replace with real WebSocket updates
-      setSystemStatus((prev) => ({
-        ...prev,
-        totalPnL: prev.totalPnL + (Math.random() - 0.5) * 100,
-        runningStrategies: Math.floor(Math.random() * 8) + 2,
-      }))
-    }, 3000)
-    return () => clearInterval(interval)
-  }, [])
+  // Combine data from different endpoints
+  const combinedSystemStatus = {
+    totalPnL: portfolioData?.totalPnL || 0,
+    activeAgents: agentStatus?.activeAgents || 0,
+    runningStrategies: strategyData?.activeStrategies || 0,
+    marketStatus: marketStatus?.status || "UNKNOWN",
+    systemUptime: systemStatus?.systemUptime || "0h 0m",
+    lastUpdate: systemStatus?.lastUpdate || new Date().toISOString(),
+  }
 
   // BACKEND INTEGRATION: Add authentication check here
   // Check if user is authenticated with your system
@@ -129,12 +110,11 @@ export default function AutonomousTradingDashboard() {
                   <DollarSign className="w-4 h-4 text-emerald-400" />
                   <span className="text-xs text-emerald-400 font-medium">TOTAL P&L</span>
                 </div>
-                <div
-                  className={`text-lg font-bold ${systemStatus.totalPnL >= 0 ? "text-emerald-400" : "text-red-400"}`}
-                >
-                  {/* MOCK DATA - REPLACE: Get from alpaca-py TradingClient.get_portfolio() */}$
-                  {systemStatus.totalPnL.toFixed(2)}
-                </div>
+                              <div
+                className={`text-lg font-bold ${combinedSystemStatus.totalPnL >= 0 ? "text-emerald-400" : "text-red-400"}`}
+              >
+                ${combinedSystemStatus.totalPnL.toFixed(2)}
+              </div>
               </div>
 
               {/* System Status */}
@@ -146,11 +126,9 @@ export default function AutonomousTradingDashboard() {
                 </div>
                 <div className="text-xs text-neutral-500 space-y-1">
                   {/* MOCK DATA - REPLACE: Get from Alpaca market calendar API */}
-                  <div>MARKET: {systemStatus.marketStatus}</div>
-                  {/* MOCK DATA - REPLACE: Count from your agent management database */}
-                  <div>AI AGENTS: {systemStatus.activeAgents} ACTIVE</div>
-                  {/* MOCK DATA - REPLACE: Count from your strategy execution database */}
-                  <div>STRATEGIES: {systemStatus.runningStrategies} RUNNING</div>
+                  <div>MARKET: {combinedSystemStatus.marketStatus}</div>
+                  <div>AI AGENTS: {combinedSystemStatus.activeAgents} ACTIVE</div>
+                  <div>STRATEGIES: {combinedSystemStatus.runningStrategies} RUNNING</div>
                 </div>
               </div>
             </div>

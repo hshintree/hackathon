@@ -4,7 +4,7 @@ Autonomous Trading Agent - FastAPI Backend
 Provides REST API endpoints for the trading agent.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from database.storage import DataStorage
@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 import os
 from typing import List, Dict, Any
 import uvicorn
+import asyncio
+import json
 
 from agents.langgraph_agent import build_graph
 
@@ -38,6 +40,31 @@ app.add_middleware(
 )
 
 graph = build_graph()
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        await websocket.send_text(message)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except:
+                # Remove disconnected clients
+                self.active_connections.remove(connection)
+
+manager = ConnectionManager()
 
 
 class StockRequest(BaseModel):
@@ -68,19 +95,21 @@ async def health_check():
         "binance": bool(os.getenv("BINANCE_API_KEY"))
     }
     
+    # Check database connection
     try:
-        storage = DataStorage()
-        with storage.get_session() as session:
-            session.execute("SELECT 1")
-        database_connected = True
+        from database.connection import is_database_connected, get_database_info
+        database_connected = is_database_connected()
+        db_info = get_database_info() if database_connected else None
     except Exception:
         database_connected = False
+        db_info = None
     
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "api_keys": api_keys,
         "database_connected": database_connected,
+        "database_info": db_info,
         "modal_available": True
     }
 
@@ -509,6 +538,61 @@ async def get_market_status():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# WebSocket endpoints
+@app.websocket("/ws/system")
+async def websocket_system(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Send system status updates every 30 seconds
+            system_data = await get_system_status()
+            await manager.send_personal_message(
+                json.dumps({
+                    "type": "system_status",
+                    "payload": system_data
+                }), 
+                websocket
+            )
+            await asyncio.sleep(30)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.websocket("/ws/agents")
+async def websocket_agents(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Send agent status updates every 15 seconds
+            agents_data = await get_agents_status()
+            await manager.send_personal_message(
+                json.dumps({
+                    "type": "agent_status",
+                    "payload": agents_data
+                }), 
+                websocket
+            )
+            await asyncio.sleep(15)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.websocket("/ws/portfolio")
+async def websocket_portfolio(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Send portfolio updates every 10 seconds
+            portfolio_data = await get_portfolio_pnl()
+            await manager.send_personal_message(
+                json.dumps({
+                    "type": "portfolio_update",
+                    "payload": portfolio_data
+                }), 
+                websocket
+            )
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
 
 if __name__ == "__main__":
     uvicorn.run("api:app", host="0.0.0.0", port=8080, reload=True, log_level="info")
