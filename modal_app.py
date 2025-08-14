@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 import pandas as pd
 import asyncio
 import json
+import uuid
+import numpy as np
 
 app = modal.App("trading-agent-data")
 
@@ -142,6 +144,69 @@ async def ingest_crypto_data(symbols: list, duration_hours: int = 24):
     
     volume.commit()
     return {"status": "success", "file": filename, "records": len(data)}
+
+# ---------- Modal analytics endpoints ----------
+
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=3600)
+def grid_scan_parent(param_grid: dict, price_payload: dict) -> dict:
+    ts = price_payload.get("timestamps", [])
+    syms = price_payload.get("symbols", [])
+    mat = price_payload.get("prices", [])  # rows align to ts, columns to syms
+    if not ts or not syms or not mat:
+        return {"error": "missing price payload"}
+    df = pd.DataFrame(mat, index=pd.to_datetime(ts), columns=syms).sort_index()
+    results = []
+    ma_short = param_grid.get("ma_short", [10])
+    ma_long = param_grid.get("ma_long", [30])
+    for s in ma_short:
+        for l in ma_long:
+            fast = df.rolling(window=int(s)).mean()
+            slow = df.rolling(window=int(l)).mean()
+            entries = (fast > slow).shift(1).fillna(False)
+            rets = df.pct_change().fillna(0)
+            port = (rets * entries.astype(float)).mean(axis=1)
+            equity = (1 + port).cumprod()
+            n = len(port)
+            cagr = float(equity.iloc[-1] ** (252/max(n,1)) - 1.0) if n>0 else 0.0
+            sharpe = float(port.mean() / (port.std() + 1e-12) * np.sqrt(252)) if n>0 else 0.0
+            mdd = float(((equity / equity.cummax()) - 1.0).min()) if n>0 else 0.0
+            results.append({"params": {"ma_short": s, "ma_long": l}, "metrics": {"cagr": cagr, "sharpe": sharpe, "max_drawdown": mdd}})
+    out = {
+        "symbols": syms,
+        "timestamps": [str(t) for t in df.index],
+        "results": results,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    os.makedirs("/data/results", exist_ok=True)
+    path = f"/data/results/grid_{uuid.uuid4().hex}.json"
+    with open(path, "w") as f:
+        json.dump(out, f)
+    volume.commit()
+    return {"status": "ok", "path": path, "count": len(results)}
+
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=1200)
+def var_mc(price_payload: dict, alpha: float = 0.95, horizon_days: int = 10, paths: int = 1000) -> dict:
+    ts = price_payload.get("timestamps", [])
+    syms = price_payload.get("symbols", [])
+    mat = price_payload.get("prices", [])
+    if not ts or not syms or not mat:
+        return {"error": "missing price payload"}
+    df = pd.DataFrame(mat, index=pd.to_datetime(ts), columns=syms).sort_index()
+    rets = df.pct_change().dropna()
+    if rets.empty:
+        return {"error": "no returns"}
+    port = rets.mean(axis=1)
+    mu, sigma = float(port.mean()), float(port.std())
+    sim = np.random.normal(mu, sigma, size=(paths, horizon_days))
+    cum = sim.sum(axis=1)
+    var = float(-np.quantile(cum, 1 - alpha))
+    out = {"alpha": alpha, "horizon_days": horizon_days, "paths": paths, "var": var}
+    os.makedirs("/data/results", exist_ok=True)
+    path = f"/data/results/var_{uuid.uuid4().hex}.json"
+    with open(path, "w") as f:
+        json.dump(out, f)
+    volume.commit()
+    return {"status": "ok", "path": path, "metrics": out}
 
 @app.web_endpoint(method="POST")
 def trigger_market_data_ingestion(request_data: dict):
