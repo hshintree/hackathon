@@ -27,7 +27,6 @@ check_port 8080 || echo "   Backend port 8080 is busy"
 check_port 3000 || echo "   Frontend port 3000 is busy"
 
 echo "🔧 Starting FastAPI backend on port 8080..."
-cd ~/repos/hackathon
 python api.py &
 BACKEND_PID=$!
 echo "   Backend PID: $BACKEND_PID"
@@ -45,7 +44,7 @@ else
 fi
 
 echo "📦 Setting up frontend dependencies..."
-cd ~/repos/hackathon/simple-query-app
+cd simple-query-app
 if [ ! -d "node_modules" ]; then
     echo "   Installing npm packages..."
     npm install
