@@ -2,7 +2,7 @@
 
 import React, { useState } from "react"
 import { Send, Bot, TrendingUp, AlertCircle, CheckCircle, Loader2 } from "lucide-react"
-import { apiClient, AgentChatResponse } from "@/lib/api"
+import { apiClient, AgentChatResponse } from "../lib/api"
 
 interface QueryResult {
   intent: string
