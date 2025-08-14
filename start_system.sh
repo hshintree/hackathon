@@ -21,17 +21,23 @@ check_port() {
     return 0
 }
 
+echo "🔍 Checking and cleaning up existing services..."
+
+echo "   Cleaning up existing MCP services..."
+pkill -f "uvicorn.*mcp_" 2>/dev/null || true
+lsof -ti:8001,8003,8004,8005 2>/dev/null | xargs kill -9 2>/dev/null || true
+
+if docker ps | grep -q "pgvector-db"; then
+    echo "🐳 Database container already running - skipping Docker startup"
+else
+    echo "🐳 Starting Docker database..."
+    docker-compose up -d
+    sleep 3
+fi
+
 echo "🔍 Checking required ports..."
 check_port 8080 || echo "   Backend port 8080 is busy"
 check_port 3000 || echo "   Frontend port 3000 is busy"
-check_port 8001 || echo "   MCP Librarian port 8001 is busy"
-check_port 8003 || echo "   MCP Quant port 8003 is busy"
-check_port 8004 || echo "   MCP Risk port 8004 is busy"
-check_port 8005 || echo "   MCP Allocator port 8005 is busy"
-
-echo "🐳 Starting Docker database..."
-docker-compose up -d
-sleep 3
 
 echo "🗄️ Initializing database schema..."
 python database/connection.py
