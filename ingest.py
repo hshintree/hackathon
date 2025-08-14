@@ -26,6 +26,7 @@ import argparse
 import os
 import sys
 from datetime import datetime
+from datetime import timezone as dt_timezone
 from typing import List, Optional
 from dotenv import load_dotenv
 
@@ -34,6 +35,7 @@ load_dotenv()
 
 from database.schema import create_database_engine, create_tables
 from database.storage import DataStorage
+from database.schema import TextChunks
 
 # Data source clients
 from data_sources.alpaca_client import AlpacaClient
@@ -48,6 +50,7 @@ import asyncio
 import time
 import math
 import pandas as pd
+import hashlib
 
 
 def _now_id(prefix: str) -> str:
@@ -271,8 +274,36 @@ def ingest_alpaca_options(underlyings: List[str], timeframe: str, start_iso: str
             storage.store_job_status(job_id, "alpaca_options", "completed", results={"records": 0})
             print("ℹ️ No option contracts returned.")
             return 0
+        # Normalize types
+        if 'expiration_date' in contracts_df.columns:
+            contracts_df['expiration_date'] = pd.to_datetime(contracts_df['expiration_date'], errors='coerce')
+        for col in ['open_interest', 'close_price']:
+            if col in contracts_df.columns:
+                contracts_df[col] = pd.to_numeric(contracts_df[col], errors='coerce')
+        # Prefer active, tradable, with open interest and near the start date
+        if 'status' in contracts_df.columns:
+            contracts_df = contracts_df[contracts_df['status'].str.lower() == 'active']
+        if 'tradable' in contracts_df.columns:
+            contracts_df = contracts_df[contracts_df['tradable'] == True]
+        if 'open_interest' in contracts_df.columns:
+            contracts_df = contracts_df[(contracts_df['open_interest'].fillna(0) > 0)]
+        # If no expiration filters provided, focus on expirations within +/- 120 days of the start
+        if not exp_gte and not exp_lte and 'expiration_date' in contracts_df.columns:
+            start_dt = pd.to_datetime(start_iso, errors='coerce')
+            if pd.notna(start_dt):
+                lo = start_dt - pd.Timedelta(days=30)
+                hi = start_dt + pd.Timedelta(days=180)
+                contracts_df = contracts_df[(contracts_df['expiration_date'] >= lo) & (contracts_df['expiration_date'] <= hi)]
+        # Prefer higher OI first
+        if 'open_interest' in contracts_df.columns:
+            contracts_df = contracts_df.sort_values(['open_interest'], ascending=[False])
+        # Cap total contracts
         if max_contracts:
             contracts_df = contracts_df.head(max_contracts)
+        if contracts_df.empty:
+            storage.store_job_status(job_id, "alpaca_options", "completed", results={"records": 0})
+            print("ℹ️ No option contracts after filtering.")
+            return 0
         # Store contracts
         storage.store_options_contracts(contracts_df)
         symbols = contracts_df['symbol'].tolist()
@@ -282,8 +313,12 @@ def ingest_alpaca_options(underlyings: List[str], timeframe: str, start_iso: str
         for i in range(0, len(symbols), batch_size):
             batch = symbols[i:i+batch_size]
             bars_df = client.get_option_bars(batch, timeframe, start_iso, end_iso)
+            if bars_df is None or bars_df.empty:
+                # Fallback: try Daily bars to capture EOD activity
+                if timeframe.lower() != 'day':
+                    bars_df = client.get_option_bars(batch, 'Day', start_iso, end_iso)
             if bars_df is not None and not bars_df.empty:
-                inserted = storage.store_options_bars(bars_df, timeframe=timeframe, source="alpaca")
+                inserted = storage.store_options_bars(bars_df, timeframe=(timeframe if not bars_df.empty else 'Day'), source="alpaca")
                 total_inserted += inserted
                 print(f"✅ Options bars inserted: +{inserted} (total {total_inserted})")
         storage.store_job_status(job_id, "alpaca_options", "completed", results={"records": total_inserted})
@@ -335,6 +370,274 @@ def ingest_news(symbols: List[str], start_iso: str, end_iso: str, use_finbert: b
         return inserted
     except Exception as e:
         storage.store_job_status(job_id, "news_alpaca", "failed", error_message=str(e))
+        raise
+
+
+def _embed_texts_384(texts: List[str]):
+    """Embed texts to 384-dim using modal if USE_MODAL_EMBEDDING=1, else local transformers."""
+    if os.getenv("USE_MODAL_EMBEDDING", "0") == "1":
+        try:
+            import modal
+            # Use from_name for deployed function
+            f = modal.Function.from_name("gigadataset-embed", "embed_texts_384")
+            out = []
+            batch_size = int(os.getenv("EMBED_BATCH", "256"))
+            for i in range(0, len(texts), batch_size):
+                sub = texts[i:i+batch_size]
+                vecs = f.remote(sub)
+                out.extend(vecs)
+            return out
+        except Exception as e:
+            print(f"⚠️ Modal embedding unavailable, falling back to local: {e}")
+    try:
+        from transformers import AutoTokenizer, AutoModel
+        import torch
+        model_name = os.getenv("EMBED_MODEL_384", "sentence-transformers/all-MiniLM-L6-v2")
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModel.from_pretrained(model_name)
+        model.eval()
+        with torch.no_grad():
+            inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="pt")
+            outputs = model(**inputs)
+            # Mean pooling
+            last_hidden = outputs.last_hidden_state
+            attention_mask = inputs['attention_mask'].unsqueeze(-1)
+            masked = last_hidden * attention_mask
+            sum_embeddings = masked.sum(dim=1)
+            sum_mask = attention_mask.sum(dim=1)
+            embeddings = (sum_embeddings / sum_mask).cpu().numpy()
+        return embeddings
+    except Exception as e:
+        raise RuntimeError(f"Embedding failed: {e}")
+
+
+def chunk_and_embed_news(window_start_iso: str, window_end_iso: str, symbols: List[str] = None, batch_size: int = 200):
+    """Chunk news summaries/headlines and store embeddings into text_chunks (384-d)."""
+    storage = DataStorage()
+    s = storage.get_session()
+    try:
+        from sqlalchemy import and_
+        from database.schema import NewsArticle
+        with s as db:
+            q = db.query(NewsArticle).filter(
+                and_(NewsArticle.published_at >= window_start_iso, NewsArticle.published_at <= window_end_iso)
+            )
+            if symbols:
+                q = q.filter(NewsArticle.symbol.in_(symbols))
+            total = q.count()
+            print(f"Chunking news rows: {total}")
+            offset = 0
+            inserted = 0
+            while offset < total:
+                batch = q.order_by(NewsArticle.published_at).offset(offset).limit(batch_size).all()
+                if not batch:
+                    break
+                texts = []
+                meta_list = []
+                for i, art in enumerate(batch):
+                    text = (art.headline or "") + "\n" + (art.summary or "")
+                    if not text.strip():
+                        continue
+                    texts.append(text[:5000])  # safety cap
+                    # Build stable doc_id within length constraints
+                    base_id = art.url or f"news:{art.id}"
+                    if base_id and len(base_id) > 180:
+                        doc_id = f"news:{hashlib.sha1(base_id.encode('utf-8')).hexdigest()}"
+                    else:
+                        doc_id = base_id
+                    meta_list.append({
+                        'source': art.source,
+                        'symbol': art.symbol,
+                        'document_id': doc_id,
+                        'original_url': art.url
+                    })
+                if texts:
+                    vecs = _embed_texts_384(texts)
+                    rows = []
+                    for (meta, vec, content) in zip(meta_list, vecs, texts):
+                        # vec may be a Python list (from Modal) or a numpy array (local); normalize to list
+                        vec_list = vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+                        rows.append(TextChunks(
+                            source='news',
+                            document_id=meta['document_id'][:200] if meta['document_id'] else None,
+                            symbol=meta['symbol'],
+                            chunk_index=0,
+                            content=content,
+                            embedding=vec_list,
+                            meta_data=meta,
+                            created_at=datetime.now(dt_timezone.utc)
+                        ))
+                    db.add_all(rows)
+                    db.commit()
+                    inserted += len(rows)
+                offset += batch_size
+            print(f"✅ Inserted {inserted} news chunks")
+            return inserted
+    except Exception as e:
+        raise
+
+
+def _html_to_paragraphs(html: str) -> List[str]:
+    try:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, 'html.parser')
+        # Remove scripts/styles
+        for tag in soup(['script','style']):
+            tag.extract()
+        text = soup.get_text('\n')
+        # Normalize and split to paragraphs
+        parts = [p.strip() for p in text.split('\n')]
+        # Merge consecutive non-empty lines into paragraphs
+        paras = []
+        buf = []
+        for line in parts:
+            if line:
+                buf.append(line)
+            else:
+                if buf:
+                    paras.append(' '.join(buf))
+                    buf = []
+        if buf:
+            paras.append(' '.join(buf))
+        # Filter very short paragraphs
+        paras = [p for p in paras if len(p) >= 200]
+        return paras
+    except Exception as e:
+        return []
+
+
+def chunk_and_embed_sec(limit: int = 1000, batch_size: int = 50, before: Optional[str] = None, forms: Optional[List[str]] = None):
+    """Fetch SEC filing HTML content, chunk to paragraphs, embed (384-d), and store in text_chunks."""
+    storage = DataStorage()
+    s = storage.get_session()
+    client = SECEdgarClient()
+    try:
+        from database.schema import SECFilings
+        with s as db:
+            q = db.query(SECFilings)
+            if forms:
+                q = q.filter(SECFilings.form_type.in_(forms))
+            if before:
+                try:
+                    dtb = pd.to_datetime(before)
+                    q = q.filter(SECFilings.filing_date < dtb)
+                except Exception:
+                    pass
+            filings = q.order_by(SECFilings.filing_date.desc()).limit(limit).all()
+            total_inserted = 0
+            for f in filings:
+                doc_id = f"sec:{f.accession_number}"
+                # Skip if already chunked
+                existing = db.query(TextChunks).filter(TextChunks.document_id == doc_id).first()
+                if existing:
+                    continue
+                if not f.primary_document or not f.accession_number or not f.cik:
+                    continue
+                try:
+                    import time, re
+                    import requests
+                    base_url = "https://data.sec.gov"
+                    accession_clean = f.accession_number.replace('-', '')
+                    # Some SEC folders are keyed by the accession-number CIK prefix, not the registrant CIK
+                    acc_cik_prefix = f.accession_number.split('-')[0]
+                    try:
+                        dir_cik = int(acc_cik_prefix)
+                    except Exception:
+                        dir_cik = int(f.cik)
+                    # Be nice to the SEC servers
+                    time.sleep(0.5)
+                    idx_url = f"{base_url}/Archives/edgar/data/{dir_cik}/{accession_clean}/index.json"
+                    r = requests.get(idx_url, headers=client.headers, timeout=10)
+                    target = None
+                    if r.status_code == 200:
+                        data = r.json()
+                        items = data.get('directory', {}).get('item', [])
+                        # Prefer primary_document if present
+                        if f.primary_document:
+                            for it in items:
+                                if it.get('name','') == f.primary_document:
+                                    target = it['name']
+                                    break
+                        # Otherwise first html file
+                        if not target:
+                            for it in items:
+                                name = it.get('name', '')
+                                if name.lower().endswith(('.htm', '.html')):
+                                    target = name
+                                    break
+                    else:
+                        # Fallback A: try directory listing page and scrape links
+                        dir_url = f"{base_url}/Archives/edgar/data/{dir_cik}/{accession_clean}/"
+                        dr = requests.get(dir_url, headers=client.headers, timeout=10)
+                        if dr.status_code == 200:
+                            links = re.findall(r'href=["\']([^"\']+\.(?:htm|html))', dr.text, flags=re.IGNORECASE)
+                            if links:
+                                if f.primary_document and f.primary_document in links:
+                                    target = f.primary_document
+                                else:
+                                    target = links[0]
+                    # Fallback 1: try direct primary_document via helper
+                    html = None
+                    if target:
+                        file_url = f"{base_url}/Archives/edgar/data/{dir_cik}/{accession_clean}/{target}"
+                        hr = requests.get(file_url, headers=client.headers, timeout=15)
+                        if hr.status_code == 200:
+                            html = hr.text
+                    if html is None:
+                        try:
+                            html = client.get_filing_content(f.cik, f.accession_number, f.primary_document)
+                        except Exception:
+                            pass
+                    # Fallback 2: try full-submission.txt
+                    if html is None:
+                        alt_url = f"{base_url}/Archives/edgar/data/{dir_cik}/{accession_clean}/full-submission.txt"
+                        har = requests.get(alt_url, headers=client.headers, timeout=15)
+                        if har.status_code == 200:
+                            html = har.text
+                            target = 'full-submission.txt'
+                    if html is None:
+                        print(f"Skip filing (unreachable) {f.cik} {f.accession_number}")
+                        continue
+                except Exception as e:
+                    print(f"SEC chunking error {f.cik} {f.accession_number}: {e}")
+                    continue
+                paras = _html_to_paragraphs(html)
+                if not paras:
+                    continue
+                # Embed in batches
+                inserted_doc = 0
+                for i in range(0, len(paras), batch_size):
+                    batch = paras[i:i+batch_size]
+                    vecs = _embed_texts_384(batch)
+                    rows = []
+                    for idx, (vec, content) in enumerate(zip(vecs, batch)):
+                        vec_list = vec.tolist() if hasattr(vec, 'tolist') else list(vec)
+                        rows.append(TextChunks(
+                            source='sec',
+                            document_id=doc_id,
+                            symbol=f.ticker,
+                            chunk_index=i+idx,
+                            content=content[:8000],
+                            embedding=vec_list,
+                            meta_data={
+                                'cik': f.cik,
+                                'ticker': f.ticker,
+                                'form_type': f.form_type,
+                                'filing_date': f.filing_date.isoformat() if f.filing_date else None,
+                                'accession_number': f.accession_number,
+                                'primary_document': f.primary_document,
+                                'doc_name': target
+                            },
+                            created_at=datetime.now(dt_timezone.utc)
+                        ))
+                    db.add_all(rows)
+                    db.commit()
+                    inserted_doc += len(rows)
+                total_inserted += inserted_doc
+                print(f"✅ Chunked {inserted_doc} chunks for {doc_id}")
+            print(f"✅ Total SEC chunks inserted: {total_inserted}")
+            return total_inserted
+    except Exception as e:
         raise
 
 
@@ -393,6 +696,18 @@ def main():
     p_news.add_argument("--use-finbert", action="store_true")
     p_news.add_argument("--max-articles", type=int, default=5000)
 
+    p_chunk_news = sub.add_parser("chunk-news", help="Chunk and embed news into text_chunks")
+    p_chunk_news.add_argument("--start", required=True, help="ISO 8601 start")
+    p_chunk_news.add_argument("--end", required=True, help="ISO 8601 end")
+    p_chunk_news.add_argument("--symbols", nargs="*", default=None)
+    p_chunk_news.add_argument("--batch-size", type=int, default=200)
+
+    p_chunk_sec = sub.add_parser("chunk-sec", help="Chunk and embed SEC filings into text_chunks")
+    p_chunk_sec.add_argument("--limit", type=int, default=200, help="Max filings to process")
+    p_chunk_sec.add_argument("--batch-size", type=int, default=50)
+    p_chunk_sec.add_argument("--before", default=None, help="Only process filings before this date (YYYY-MM-DD)")
+    p_chunk_sec.add_argument("--forms", nargs="*", default=None, help="Filter forms to process (e.g., 10-K 10-Q)")
+
     args = parser.parse_args()
 
     if args.command == "setup-db":
@@ -413,6 +728,10 @@ def main():
         ingest_alpaca_options(args.underlyings, args.timeframe, args.start, args.end, args.expiration_gte, args.expiration_lte, args.max_contracts)
     elif args.command == "ingest-news":
         ingest_news(args.symbols, args.start, args.end, args.use_finbert, args.max_articles)
+    elif args.command == "chunk-news":
+        chunk_and_embed_news(args.start, args.end, args.symbols, args.batch_size)
+    elif args.command == "chunk-sec":
+        chunk_and_embed_sec(args.limit, args.batch_size, args.before, args.forms)
     else:
         parser.error("Unknown command")
 

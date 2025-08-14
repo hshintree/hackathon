@@ -148,6 +148,19 @@ class NewsArticle(Base):
     raw = Column(JSON)
     created_at = Column(DateTime)
 
+class TextChunks(Base):
+    __tablename__ = 'text_chunks'
+    
+    id = Column(Integer, primary_key=True)
+    source = Column(String(20), nullable=False, index=True)  # e.g., 'sec', 'news'
+    document_id = Column(String(200), nullable=False, index=True)
+    symbol = Column(String(32), index=True)
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    embedding = Column(Vector(384))
+    meta_data = Column(JSON)
+    created_at = Column(DateTime)
+
 
 def get_database_url():
     """Get database URL from environment variables"""

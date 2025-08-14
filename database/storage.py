@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Any
 import json
 import logging
 import numpy as np
+import math
 
 from .schema import (
 	MarketData, SECFilings, MacroData, CryptoData, 
@@ -28,13 +29,20 @@ class DataStorage:
 	def _to_jsonable_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
 		"""Convert pandas/NumPy/datetime types to JSON-serializable primitives."""
 		def convert(value):
+			# Normalize pandas/NumPy NaN/NaT to None for Postgres JSON
+			try:
+				if pd.isna(value):
+					return None
+			except Exception:
+				pass
 			if isinstance(value, (pd.Timestamp, datetime)):
 				# Convert to ISO string
 				return value.isoformat()
 			if isinstance(value, (np.integer,)):
 				return int(value)
 			if isinstance(value, (np.floating,)):
-				return float(value)
+				v = float(value)
+				return None if math.isnan(v) else v
 			if isinstance(value, (np.bool_,)):
 				return bool(value)
 			return value
@@ -75,8 +83,21 @@ class DataStorage:
 		"""Store SEC filings in database"""
 		try:
 			with self.get_session() as session:
+				# Skip if empty
+				if df is None or df.empty:
+					return 0
+				# Preload existing accession_numbers to avoid unique violations
+				existing = set(
+					row[0]
+					for row in session.query(SECFilings.accession_number).filter(
+						SECFilings.accession_number.in_(df['accession_number'].astype(str).tolist())
+					).all()
+				)
 				records = []
 				for _, row in df.iterrows():
+					acc = str(row['accession_number'])
+					if acc in existing:
+						continue
 					record = SECFilings(
 						cik=row['cik'],
 						company_name=row.get('company_name'),
@@ -84,18 +105,18 @@ class DataStorage:
 						form_type=row['form'],
 						filing_date=row['filing_date'],
 						report_date=row.get('report_date'),
-						accession_number=row['accession_number'],
+						accession_number=acc,
 						primary_document=row.get('primary_document'),
 						document_description=row.get('primary_doc_description')
 					)
 					records.append(record)
 				
-				session.add_all(records)
-				session.commit()
-				
-				logger.info(f"Stored {len(records)} SEC filing records")
-				return len(records)
-				
+				if records:
+					session.add_all(records)
+					session.commit()
+					logger.info(f"Stored {len(records)} SEC filing records")
+					return len(records)
+				return 0
 		except Exception as e:
 			logger.error(f"Error storing SEC filings: {e}")
 			raise

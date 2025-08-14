@@ -11,12 +11,16 @@ logger = logging.getLogger(__name__)
 class SECEdgarClient:
     def __init__(self):
         self.base_url = "https://data.sec.gov"
+        # Use a configurable User-Agent per SEC guidance
+        ua = os.getenv("SEC_USER_AGENT", "Gigadataset Ingestor (contact@example.com)")
         self.headers = {
-            "User-Agent": "Trading Agent (contact@example.com)",
+            "User-Agent": ua,
+            "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
             "Accept-Encoding": "gzip, deflate",
-            "Host": "data.sec.gov"
+            "Connection": "keep-alive"
         }
-        self.rate_limit_delay = 0.1
+        # Be conservative to avoid throttling
+        self.rate_limit_delay = 0.5
     
     def _make_request(self, url: str, params=None):
         """Make rate-limited request to SEC API"""
@@ -30,8 +34,28 @@ class SECEdgarClient:
             raise
     
     def get_company_tickers(self):
-        """Get company ticker to CIK mapping"""
+        """Get company ticker to CIK mapping (live list from SEC)."""
         try:
+            url = "https://www.sec.gov/files/company_tickers.json"
+            time.sleep(self.rate_limit_delay)
+            r = requests.get(url, headers=self.headers, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+            # Data is a dict keyed by index -> {cik_str, ticker, title}
+            rows = []
+            for _, obj in data.items():
+                rows.append({
+                    'cik': str(obj.get('cik_str')).zfill(10),
+                    'ticker': obj.get('ticker'),
+                    'title': obj.get('title')
+                })
+            df = pd.DataFrame(rows)
+            # Keep common stock-like tickers (simple filter)
+            df = df[df['ticker'].str.match(r'^[A-Z]{1,5}$', na=False)]
+            return df
+        except Exception as e:
+            logger.error(f"Error fetching company tickers: {e}")
+            # Fallback small sample to avoid hard failure
             sample_companies = [
                 {'cik': '0000320193', 'ticker': 'AAPL', 'title': 'Apple Inc.'},
                 {'cik': '0001652044', 'ticker': 'GOOGL', 'title': 'Alphabet Inc.'},
@@ -39,12 +63,7 @@ class SECEdgarClient:
                 {'cik': '0001018724', 'ticker': 'AMZN', 'title': 'Amazon.com, Inc.'},
                 {'cik': '0001326801', 'ticker': 'META', 'title': 'Meta Platforms, Inc.'}
             ]
-            
             return pd.DataFrame(sample_companies)
-            
-        except Exception as e:
-            logger.error(f"Error fetching company tickers: {e}")
-            raise
     
     def get_company_facts(self, cik: str):
         """Get company facts for a specific CIK"""
@@ -85,7 +104,7 @@ class SECEdgarClient:
         try:
             if cik_list is None:
                 tickers_df = self.get_company_tickers()
-                cik_list = tickers_df['cik'].head(10).tolist()
+                cik_list = tickers_df['cik'].head(100).tolist()
             
             if forms is None:
                 forms = ['10-K', '10-Q', '8-K']
@@ -137,16 +156,17 @@ class SECEdgarClient:
     def get_filing_content(self, cik: str, accession_number: str, primary_document: str):
         """Get the content of a specific filing"""
         try:
-            cik_padded = str(cik).zfill(10)
             accession_clean = accession_number.replace('-', '')
-            
-            url = f"{self.base_url}/Archives/edgar/data/{int(cik)}/{accession_clean}/{primary_document}"
-            
-            response = requests.get(url, headers=self.headers)
-            response.raise_for_status()
-            
-            return response.text
-            
+            # Try data.sec.gov first
+            url = f"https://data.sec.gov/Archives/edgar/data/{int(cik)}/{accession_clean}/{primary_document}"
+            r = requests.get(url, headers=self.headers)
+            if r.status_code == 200:
+                return r.text
+            # Fallback to www.sec.gov
+            url2 = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_clean}/{primary_document}"
+            r2 = requests.get(url2, headers=self.headers)
+            r2.raise_for_status()
+            return r2.text
         except Exception as e:
             logger.error(f"Error fetching filing content: {e}")
             raise
