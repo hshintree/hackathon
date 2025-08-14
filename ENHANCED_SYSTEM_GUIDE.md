@@ -1,24 +1,25 @@
-# Enhanced MCP and Modal Integration Guide
+# Enhanced Direct Tool Integration Guide
 
 ## Overview
 
-The autonomous trading agent system has been enhanced to use real MCP services and Modal deployments for sophisticated financial analytics, moving beyond fallback mechanisms to provide advanced query processing capabilities.
+The autonomous trading agent system has been enhanced to use direct tool function calls instead of separate MCP services, providing sophisticated financial analytics with simplified architecture while maintaining Modal deployments for compute-intensive operations.
 
 ## System Architecture
 
 ### Components
 - **Docker Database**: PostgreSQL with pgvector for data storage
-- **MCP Services**: Librarian, Quant, Risk, and Allocation services with database connectivity
+- **Direct Tool Functions**: search_text, get_prices, backtest, VaR, portfolio optimization
 - **Modal Functions**: Compute-intensive operations (grid_scan, VaR, portfolio optimization)
-- **FastAPI Backend**: Enhanced langgraph_agent.py with Modal integration
+- **FastAPI Backend**: Enhanced langgraph_agent.py with direct tool integration
 - **Next.js Frontend**: Clean interface with real-time query processing
 
 ### Key Enhancements
-- Database connectivity for MCP services
+- Direct database access through tool functions (no HTTP overhead)
 - Modal web endpoint integration for sophisticated analytics
 - Improved intent detection for proper query routing
 - USE_MODAL environment variable for flexible deployment
-- Graceful fallback mechanisms when services unavailable
+- Simplified architecture without separate MCP services
+- Eliminated port conflicts and service management complexity
 
 ## Quick Start
 
@@ -33,18 +34,14 @@ docker-compose up -d
 python database/connection.py
 ```
 
-### 3. Start MCP Services
+### 3. Set Environment Variables
 ```bash
 export PYTHONPATH=/home/ubuntu/repos/hackathon:$PYTHONPATH
-python -m uvicorn agents.mcp_librarian:app --port 8001 --host 0.0.0.0 &
-python -m uvicorn agents.mcp_quant:app --port 8003 --host 0.0.0.0 &
-python -m uvicorn agents.mcp_risk:app --port 8004 --host 0.0.0.0 &
-python -m uvicorn agents.mcp_allocator:app --port 8005 --host 0.0.0.0 &
+export USE_MODAL=1
 ```
 
 ### 4. Start Backend
 ```bash
-export USE_MODAL=1
 python -m uvicorn api:app --port 8080 --host 0.0.0.0 &
 ```
 
@@ -56,7 +53,7 @@ npm run dev
 
 ### 6. Access System
 - Frontend: Port 3000
-- Backend API: Port 8080
+- Backend API with Direct Tool Integration: Port 8080
 
 ## Modal Integration
 
@@ -67,7 +64,7 @@ npm run dev
 - **Graph Query**: `https://hshindy--trading-agent-data-query-graph.modal.run`
 
 ### Usage Control
-Set `USE_MODAL=1` in environment to enable Modal functions for compute-intensive operations. When disabled, system falls back to MCP services.
+Set `USE_MODAL=1` in environment to enable Modal functions for compute-intensive operations. When disabled, system uses direct tool function calls.
 
 ## Query Types Supported
 
@@ -75,28 +72,28 @@ Set `USE_MODAL=1` in environment to enable Modal functions for compute-intensive
 ```
 "run grid scan on AAPL with different moving average parameters"
 ```
-- Routes to: quant_node → Modal grid_scan endpoint
+- Routes to: quant_node → Modal grid_scan endpoint (or direct backtest function)
 - Returns: Parameter optimization results
 
 ### Risk Analysis
 ```
 "compute VaR for AAPL and GOOGL portfolio"
 ```
-- Routes to: risk_node → Modal VaR endpoint
+- Routes to: risk_node → Modal VaR endpoint (or direct VaR function)
 - Returns: Value at Risk calculations
 
 ### Portfolio Optimization
 ```
 "optimize portfolio allocation for tech stocks"
 ```
-- Routes to: alloc_node → Modal optimization endpoint
+- Routes to: alloc_node → Modal optimization endpoint (or direct optimization function)
 - Returns: Optimal weight allocations
 
 ### Search Queries
 ```
 "search for recent Apple stock analysis"
 ```
-- Routes to: librarian_node → MCP search service
+- Routes to: librarian_node → Direct search_text function
 - Returns: Relevant document chunks
 
 ## Database Schema
@@ -121,12 +118,8 @@ Set `USE_MODAL=1` in environment to enable Modal functions for compute-intensive
 python test_db_connection.py
 ```
 
-### MCP Services
-```bash
-curl -X POST "http://localhost:8001/tools/search_corpus" \
-  -H "Content-Type: application/json" \
-  -d '{"query": "Apple stock analysis", "top_k": 3}'
-```
+### Direct Tool Functions
+Direct tool functions are called internally by the backend - no separate services needed.
 
 ### Modal Functions
 ```bash
@@ -163,10 +156,10 @@ curl -X POST "http://localhost:8080/agent/chat" \
 - Check database connectivity: `python test_db_connection.py`
 - Verify tables exist: Check output shows all required tables
 
-### MCP Service Issues
+### Direct Tool Issues
 - Verify PYTHONPATH is set correctly
-- Check service logs for connection errors
-- Test individual services with curl commands
+- Check backend logs for tool function errors
+- Ensure database connectivity is working
 
 ### Modal Issues
 - Verify Modal functions are deployed and accessible
@@ -182,8 +175,8 @@ curl -X POST "http://localhost:8080/agent/chat" \
 
 - Modal functions handle compute-intensive operations efficiently
 - Database queries are optimized with proper indexing
-- MCP services provide fast fallback for standard operations
-- System gracefully degrades when services unavailable
+- Direct tool calls eliminate HTTP overhead for local operations
+- System gracefully degrades when Modal services unavailable
 
 ## Security
 

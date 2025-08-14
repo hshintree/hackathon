@@ -3,6 +3,11 @@ from langgraph.graph import StateGraph, START, END
 import os, httpx, json, re
 from llm_client import chat
 
+from agents.retrieval_tools import search_text, get_doc, get_prices
+from graph_rag import search_graph as _search_graph
+import pandas as pd
+import numpy as np
+
 LIB_URL = os.getenv("MCP_LIBRARIAN_URL", "http://localhost:8001")
 DATA_URL = os.getenv("MCP_DATA_URL", "http://localhost:8002")
 QUANT_URL = os.getenv("MCP_QUANT_URL", "http://localhost:8003")
@@ -95,12 +100,149 @@ async def call_modal_endpoint(url: str, payload: Dict[str, Any]) -> Dict[str, An
 	except Exception as e:
 		return {"error": f"Modal endpoint failed: {str(e)}", "fallback": True}
 
+def call_search_corpus(query: str, top_k: int = 10, alpha: float = 0.5, rerank: bool = True, sources: Optional[List[str]] = None) -> Dict[str, Any]:
+	"""Direct call to search_text with MCP-compatible response format"""
+	try:
+		res = search_text(query, top_k=top_k, alpha=alpha, use_bm25=True, rerank=rerank)
+		if sources:
+			res = [r for r in res if r.get("source") in sources]
+		return {"results": res}
+	except Exception as e:
+		return create_fallback_response("/search_corpus", {"query": query}, str(e))
+
+def call_get_chunk(chunk_id: int) -> Dict[str, Any]:
+	"""Direct call to get_doc with MCP-compatible response format"""
+	try:
+		doc = get_doc(chunk_id)
+		return {"doc": doc}
+	except Exception as e:
+		return {"doc": {}, "error": f"Failed to get chunk: {str(e)}"}
+
+def call_search_graph(query: str, top_k: int = 10) -> Dict[str, Any]:
+	"""Direct call to search_graph with MCP-compatible response format"""
+	try:
+		res = _search_graph(query, top_k=top_k)
+		return {"results": res}
+	except Exception as e:
+		return {"results": [], "error": f"Graph search failed: {str(e)}"}
+
+def call_run_backtest(params: Dict[str, Any], universe: List[str], start: str, end: str) -> Dict[str, Any]:
+	"""Direct backtest implementation from mcp_quant.py logic"""
+	try:
+		prices = get_prices(universe, start, end, source=None, limit=None)
+		df = pd.DataFrame(prices)
+		if df.empty:
+			return {"metrics": {}, "note": "no data"}
+		
+		df['timestamp'] = pd.to_datetime(df['timestamp'])
+		wide = df.pivot_table(index='timestamp', columns='symbol', values='close').sort_index().dropna(how='all')
+		
+		try:
+			import vectorbt as vbt
+			if params.get('strategy', 'ma_cross') == 'ma_cross':
+				short = int(params.get('ma_short', 10))
+				long = int(params.get('ma_long', 30))
+				fast = wide.vbt.rolling_mean(window=short)
+				slow = wide.vbt.rolling_mean(window=long)
+				entries = fast > slow
+				exits = fast < slow
+				pf = vbt.Portfolio.from_signals(wide, entries, exits, fees=0.0005, slippage=0.0005, freq='D')
+				stats = pf.stats()
+				metrics = {
+					"total_return": float(stats.get('Total Return [%]', np.nan))/100.0 if 'Total Return [%]' in stats else float(pf.total_return()),
+					"cagr": float(stats.get('CAGR [%]', np.nan))/100.0 if 'CAGR [%]' in stats else float(pf.annualized_return()),
+					"sharpe": float(stats.get('Sharpe Ratio', np.nan)) if 'Sharpe Ratio' in stats else float(pf.sharpe_ratio()),
+					"max_drawdown": float(stats.get('Max Drawdown [%]', np.nan))/100.0 if 'Max Drawdown [%]' in stats else float(pf.max_drawdown()),
+				}
+				return {"metrics": metrics}
+		except ImportError:
+			pass
+		
+		# Fallback: equal-weight daily rebalanced
+		rets = wide.pct_change().dropna()
+		if rets.empty:
+			return {"metrics": {}}
+		w = np.ones(len(rets.columns)) / len(rets.columns)
+		port = (rets.fillna(0) @ w)
+		equity = (1 + port).cumprod()
+		n = len(port)
+		metrics = {
+			"total_return": float(equity.iloc[-1] - 1.0),
+			"cagr": float(equity.iloc[-1] ** (252/max(n,1)) - 1.0),
+			"sharpe": float(port.mean()/ (port.std() + 1e-12) * np.sqrt(252)),
+			"max_drawdown": float(((equity / equity.cummax()) - 1.0).min()),
+		}
+		return {"metrics": metrics}
+	except Exception as e:
+		return create_fallback_response("/run_backtest", {"params": params, "universe": universe}, str(e))
+
+def call_compute_var(method: str, horizon_days: int, paths: int, assets: List[str], start: str, end: str, alpha: float = 0.95) -> Dict[str, Any]:
+	"""Direct VaR computation from mcp_risk.py logic"""
+	try:
+		prices = get_prices(assets, start, end, source=None, limit=None)
+		df = pd.DataFrame(prices)
+		if df.empty:
+			return {"var": None, "note": "no data"}
+		
+		df['timestamp'] = pd.to_datetime(df['timestamp'])
+		pivot = df.pivot_table(index='timestamp', columns='symbol', values='close').sort_index()
+		rets = pivot.pct_change().dropna()
+		port = rets.mean(axis=1)
+		mu, sigma = float(port.mean()), float(port.std())
+		sim = np.random.normal(mu, sigma, size=(paths, horizon_days))
+		cum = sim.sum(axis=1)
+		var = -np.quantile(cum, 1-alpha)
+		return {"var": float(var), "mu": mu, "sigma": sigma}
+	except Exception as e:
+		return create_fallback_response("/compute_var", {"assets": assets}, str(e))
+
+def call_optimize_portfolio(method: str, assets: List[str], constraints: Dict[str, Any], start: str, end: str) -> Dict[str, Any]:
+	"""Direct portfolio optimization from mcp_allocator.py logic"""
+	try:
+		px = get_prices(assets, start, end, source=None, limit=None)
+		df = pd.DataFrame(px)
+		if df.empty:
+			return {"weights": {}, "method": method, "note": "no data"}
+		
+		df['timestamp'] = pd.to_datetime(df['timestamp'])
+		wide = df.pivot_table(index='timestamp', columns='symbol', values='close').sort_index().dropna(how='all')
+		rets = wide.pct_change().dropna()
+		
+		min_w = float(constraints.get("min_weight", 0.0))
+		max_w = float(constraints.get("max_weight", 1.0))
+		
+		if method.upper() in {"MEANVAR", "MEAN_VAR", "MV"}:
+			try:
+				from pypfopt import EfficientFrontier, risk_models, expected_returns
+				mu = expected_returns.mean_historical_return(wide, frequency=252)
+				S = risk_models.CovarianceShrinkage(wide).ledoit_wolf()
+				ef = EfficientFrontier(mu, S, weight_bounds=(min_w, max_w))
+				w = ef.max_sharpe()
+				weights = ef.clean_weights()
+				perf = ef.portfolio_performance(verbose=False)
+				return {"weights": weights, "method": "MeanVar", "metrics": {"ret": float(perf[0]), "vol": float(perf[1]), "sharpe": float(perf[2])}}
+			except ImportError:
+				pass
+		
+		if method.upper() == "HRP":
+			try:
+				from pypfopt.hierarchical_portfolio import HRPOpt
+				hrp = HRPOpt(returns=rets)
+				weights = hrp.optimize()
+				return {"weights": {k: float(v) for k, v in weights.items()}, "method": "HRP"}
+			except ImportError:
+				pass
+		
+		n = len(assets) or 1
+		w = 1.0 / n
+		weights = {a: w for a in assets}
+		return {"weights": weights, "method": method, "note": "fallback"}
+	except Exception as e:
+		return create_fallback_response("/optimize_portfolio", {"symbols": assets}, str(e))
+
 def build_price_payload(symbols: List[str], start: str, end: str) -> Dict[str, Any]:
 	"""Build price payload for Modal functions from database"""
 	try:
-		from agents.retrieval_tools import get_prices
-		import pandas as pd
-		
 		prices = get_prices(symbols, start, end, source=None, limit=None)
 		if not prices:
 			return {}
@@ -179,7 +321,8 @@ def route_node(state: AgentState) -> AgentState:
 async def librarian_node(state: AgentState) -> AgentState:
 	q = state.get("result",{}).get("payload",{}).get("query") or state["query"]
 	top_k = state.get("result",{}).get("payload",{}).get("top_k", 10)
-	res = await call_tool(LIB_URL, "/tools/search_corpus", {"query": q, "top_k": top_k, "alpha": 0.5, "rerank": True})
+	sources = state.get("result",{}).get("payload",{}).get("sources")
+	res = call_search_corpus(q, top_k=top_k, alpha=0.5, rerank=True, sources=sources)
 	state["context"] = res.get("results", [])
 	state["result"] = res
 	return state
@@ -203,9 +346,20 @@ async def quant_node(state: AgentState) -> AgentState:
 			}
 			res = await call_modal_endpoint(MODAL_GRID_SCAN_URL, modal_payload)
 		else:
-			res = await call_tool(QUANT_URL, "/tools/grid_scan", pl)
+			results = []
+			ma_short = param_grid.get('ma_short', [10])
+			ma_long = param_grid.get('ma_long', [30])
+			for s in ma_short:
+				for l in ma_long:
+					backtest_res = call_run_backtest({'strategy':'ma_cross','ma_short':s,'ma_long':l}, symbols, start, end)
+					results.append({"params": {"ma_short": s, "ma_long": l}, "metrics": backtest_res.get("metrics",{})})
+			res = {"status": "done", "results": results}
 	else:
-		res = await call_tool(QUANT_URL, "/tools/run_backtest", pl)
+		params = pl.get("params", {"strategy": "ma_cross", "ma_short": 10, "ma_long": 30})
+		universe = pl.get("universe", ["AAPL"])
+		start = pl.get("start", "2023-01-01")
+		end = pl.get("end", "2023-12-31")
+		res = call_run_backtest(params, universe, start, end)
 	
 	state["result"] = res
 	return state
@@ -230,10 +384,23 @@ async def risk_node(state: AgentState) -> AgentState:
 			}
 			res = await call_modal_endpoint(MODAL_VAR_URL, modal_payload)
 		else:
-			res = await call_tool(RISK_URL, "/tools/compute_var", pl)
+			method = pl.get("method", "mc")
+			horizon_days = pl.get("horizon_days", 10)
+			paths = pl.get("paths", 1000)
+			alpha = pl.get("alpha", pl.get("confidence_level", 0.95))
+			res = call_compute_var(method, horizon_days, paths, assets, start, end, alpha)
 	else:
-		path = "/tools/compute_var" if intent == "compute_var" else "/tools/stress_test"
-		res = await call_tool(RISK_URL, path, pl)
+		if intent == "compute_var":
+			method = pl.get("method", "mc")
+			horizon_days = pl.get("horizon_days", 10)
+			paths = pl.get("paths", 1000)
+			assets = pl.get("assets", ["AAPL", "GOOGL"])
+			start = pl.get("start", "2023-01-01")
+			end = pl.get("end", "2023-12-31")
+			alpha = pl.get("alpha", 0.95)
+			res = call_compute_var(method, horizon_days, paths, assets, start, end, alpha)
+		else:
+			res = {"scenarios": [], "note": "stress test not implemented in direct tools"}
 	
 	state["result"] = res
 	return state
@@ -256,9 +423,16 @@ async def alloc_node(state: AgentState) -> AgentState:
 			}
 			res = await call_modal_endpoint(MODAL_OPTIMIZE_URL, modal_payload)
 		else:
-			res = await call_tool(ALLOC_URL, "/tools/optimize_portfolio", pl)
+			method = pl.get("method", "HRP")
+			constraints = pl.get("constraints", {})
+			res = call_optimize_portfolio(method, symbols, constraints, start, end)
 	else:
-		res = await call_tool(ALLOC_URL, "/tools/optimize_portfolio", pl)
+		method = pl.get("method", "HRP")
+		symbols = pl.get("symbols", ["AAPL", "GOOGL", "MSFT"])
+		start = pl.get("start", "2023-01-01")
+		end = pl.get("end", "2023-12-31")
+		constraints = pl.get("constraints", {})
+		res = call_optimize_portfolio(method, symbols, constraints, start, end)
 	
 	state["result"] = res
 	return state
@@ -293,4 +467,4 @@ def build_graph():
 	g.add_edge("quant", END)
 	g.add_edge("risk", END)
 	g.add_edge("alloc", END)
-	return g.compile()        
+	return g.compile()          
