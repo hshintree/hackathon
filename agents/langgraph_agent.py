@@ -9,6 +9,13 @@ QUANT_URL = os.getenv("MCP_QUANT_URL", "http://localhost:8003")
 RISK_URL = os.getenv("MCP_RISK_URL", "http://localhost:8004")
 ALLOC_URL = os.getenv("MCP_ALLOC_URL", "http://localhost:8005")
 
+MODAL_GRID_SCAN_URL = "https://hshindy--trading-agent-data-run-grid-scan.modal.run"
+MODAL_VAR_URL = "https://hshindy--trading-agent-data-run-var.modal.run"
+MODAL_OPTIMIZE_URL = "https://hshindy--trading-agent-data-run-optimize.modal.run"
+MODAL_GRAPH_QUERY_URL = "https://hshindy--trading-agent-data-query-graph.modal.run"
+
+USE_MODAL = os.getenv("USE_MODAL", "0") == "1"
+
 
 class AgentState(TypedDict, total=False):
 	query: str
@@ -78,6 +85,39 @@ def create_fallback_response(path: str, payload: Dict[str, Any], error: str) -> 
 		}
 
 
+async def call_modal_endpoint(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+	"""Call Modal web endpoint for compute-intensive operations"""
+	try:
+		async with httpx.AsyncClient(timeout=60.0) as client:
+			r = await client.post(url, json=payload)
+			r.raise_for_status()
+			return r.json()
+	except Exception as e:
+		return {"error": f"Modal endpoint failed: {str(e)}", "fallback": True}
+
+def build_price_payload(symbols: List[str], start: str, end: str) -> Dict[str, Any]:
+	"""Build price payload for Modal functions from database"""
+	try:
+		from agents.retrieval_tools import get_prices
+		import pandas as pd
+		
+		prices = get_prices(symbols, start, end, source=None, limit=None)
+		if not prices:
+			return {}
+			
+		df = pd.DataFrame(prices)
+		df['timestamp'] = pd.to_datetime(df['timestamp'])
+		wide = df.pivot_table(index='timestamp', columns='symbol', values='close').sort_index().dropna(how='all')
+		
+		return {
+			"symbols": list(wide.columns),
+			"timestamps": [str(t) for t in wide.index],
+			"prices": wide.values.tolist()
+		}
+	except Exception as e:
+		return {}
+
+
 def plan_node(state: AgentState) -> AgentState:
 	system = (
 		"You orchestrate financial tasks by choosing: search_corpus, get_chunk, run_backtest, "
@@ -104,15 +144,18 @@ def plan_node(state: AgentState) -> AgentState:
 				pass
 	except Exception as e:
 		query_lower = state["query"].lower()
-		if any(word in query_lower for word in ["backtest", "test", "strategy"]):
+		if any(word in query_lower for word in ["grid", "scan", "parameter", "sweep", "optimize parameters"]):
+			intent = "grid_scan"
+			payload = {"universe": ["AAPL"], "start": "2023-01-01", "end": "2023-12-31", "param_grid": {"ma_short": [10, 20], "ma_long": [30, 50]}}
+		elif any(word in query_lower for word in ["backtest", "test", "strategy"]):
 			intent = "run_backtest"
-			payload = {"symbol": "AAPL", "strategy": "moving_average", "start_date": "2023-01-01", "end_date": "2024-01-01"}
+			payload = {"universe": ["AAPL"], "start": "2023-01-01", "end": "2023-12-31", "params": {"strategy": "ma_cross", "ma_short": 10, "ma_long": 30}}
 		elif any(word in query_lower for word in ["risk", "var", "volatility"]):
 			intent = "compute_var"
-			payload = {"portfolio": ["AAPL", "GOOGL"], "confidence_level": 0.95}
+			payload = {"assets": ["AAPL", "GOOGL"], "start": "2023-01-01", "end": "2023-12-31", "alpha": 0.95}
 		elif any(word in query_lower for word in ["optimize", "allocation", "portfolio"]):
 			intent = "optimize_portfolio"
-			payload = {"symbols": ["AAPL", "GOOGL", "MSFT"], "target_return": 0.1}
+			payload = {"symbols": ["AAPL", "GOOGL", "MSFT"], "start": "2023-01-01", "end": "2023-12-31"}
 		else:
 			intent = "search_corpus"
 			payload = {"query": state["query"], "top_k": 10}
@@ -144,25 +187,79 @@ async def librarian_node(state: AgentState) -> AgentState:
 
 async def quant_node(state: AgentState) -> AgentState:
 	pl = state.get("result",{}).get("payload",{})
-	res = await call_tool(QUANT_URL, "/tools/run_backtest", pl)
+	intent = state.get("intent", "run_backtest")
+	
+	if intent == "grid_scan" and USE_MODAL:
+		symbols = pl.get("universe", ["AAPL"])
+		start = pl.get("start", "2023-01-01")
+		end = pl.get("end", "2023-12-31")
+		param_grid = pl.get("param_grid", {"ma_short": [10, 20], "ma_long": [30, 50]})
+		
+		price_payload = build_price_payload(symbols, start, end)
+		if price_payload:
+			modal_payload = {
+				"param_grid": param_grid,
+				"price_payload": price_payload
+			}
+			res = await call_modal_endpoint(MODAL_GRID_SCAN_URL, modal_payload)
+		else:
+			res = await call_tool(QUANT_URL, "/tools/grid_scan", pl)
+	else:
+		res = await call_tool(QUANT_URL, "/tools/run_backtest", pl)
+	
 	state["result"] = res
 	return state
 
 
 async def risk_node(state: AgentState) -> AgentState:
 	pl = state.get("result",{}).get("payload",{})
-	if state["intent"] == "compute_var":
-		path = "/tools/compute_var"
+	intent = state.get("intent", "compute_var")
+	
+	if intent == "compute_var" and USE_MODAL:
+		assets = pl.get("assets", pl.get("portfolio", ["AAPL", "GOOGL"]))
+		start = pl.get("start", "2023-01-01")
+		end = pl.get("end", "2023-12-31")
+		
+		price_payload = build_price_payload(assets, start, end)
+		if price_payload:
+			modal_payload = {
+				"price_payload": price_payload,
+				"alpha": pl.get("alpha", pl.get("confidence_level", 0.95)),
+				"horizon_days": pl.get("horizon_days", 10),
+				"paths": pl.get("paths", 1000)
+			}
+			res = await call_modal_endpoint(MODAL_VAR_URL, modal_payload)
+		else:
+			res = await call_tool(RISK_URL, "/tools/compute_var", pl)
 	else:
-		path = "/tools/stress_test"
-	res = await call_tool(RISK_URL, path, pl)
+		path = "/tools/compute_var" if intent == "compute_var" else "/tools/stress_test"
+		res = await call_tool(RISK_URL, path, pl)
+	
 	state["result"] = res
 	return state
 
 
 async def alloc_node(state: AgentState) -> AgentState:
 	pl = state.get("result",{}).get("payload",{})
-	res = await call_tool(ALLOC_URL, "/tools/optimize_portfolio", pl)
+	
+	if USE_MODAL:
+		symbols = pl.get("symbols", ["AAPL", "GOOGL", "MSFT"])
+		start = pl.get("start", "2023-01-01")
+		end = pl.get("end", "2023-12-31")
+		
+		price_payload = build_price_payload(symbols, start, end)
+		if price_payload:
+			modal_payload = {
+				"price_payload": price_payload,
+				"method": pl.get("method", "HRP"),
+				"constraints": pl.get("constraints", {})
+			}
+			res = await call_modal_endpoint(MODAL_OPTIMIZE_URL, modal_payload)
+		else:
+			res = await call_tool(ALLOC_URL, "/tools/optimize_portfolio", pl)
+	else:
+		res = await call_tool(ALLOC_URL, "/tools/optimize_portfolio", pl)
+	
 	state["result"] = res
 	return state
 
@@ -196,4 +293,4 @@ def build_graph():
 	g.add_edge("quant", END)
 	g.add_edge("risk", END)
 	g.add_edge("alloc", END)
-	return g.compile()    
+	return g.compile()        
