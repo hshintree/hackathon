@@ -110,7 +110,11 @@ async def ingest_crypto_data(symbols: list, duration_hours: int = 24):
     volume.commit()
     return {"status": "success", "file": filename, "records": len(data)}
 
-@app.web_endpoint(method="POST")
+@app.function(
+    image=image,
+    secrets=[secrets]
+)
+@modal.fastapi_endpoint(method="POST", label="trigger-market-data")
 def trigger_market_data_ingestion(request_data: dict):
     """Web endpoint to trigger market data ingestion"""
     symbols = request_data.get("symbols", ["AAPL", "GOOGL", "MSFT"])
@@ -120,7 +124,11 @@ def trigger_market_data_ingestion(request_data: dict):
     job = ingest_market_data.spawn(symbols, start_date, end_date)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(
+    image=image,
+    secrets=[secrets]
+)
+@modal.fastapi_endpoint(method="POST", label="trigger-sec")
 def trigger_sec_ingestion(request_data: dict):
     """Web endpoint to trigger SEC filings ingestion"""
     cik_list = request_data.get("cik_list")
@@ -129,7 +137,11 @@ def trigger_sec_ingestion(request_data: dict):
     job = ingest_sec_filings.spawn(cik_list, forms)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(
+    image=image,
+    secrets=[secrets]
+)
+@modal.fastapi_endpoint(method="POST", label="trigger-macro")
 def trigger_macro_ingestion(request_data: dict):
     """Web endpoint to trigger macro data ingestion"""
     series_ids = request_data.get("series_ids", ["GDP", "UNRATE", "CPIAUCSL"])
@@ -139,7 +151,11 @@ def trigger_macro_ingestion(request_data: dict):
     job = ingest_macro_data.spawn(series_ids, start_date, end_date)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(
+    image=image,
+    secrets=[secrets]
+)
+@modal.fastapi_endpoint(method="POST", label="trigger-crypto")
 def trigger_crypto_ingestion(request_data: dict):
     """Web endpoint to trigger crypto data ingestion"""
     symbols = request_data.get("symbols", ["BTCUSDT", "ETHUSDT"])

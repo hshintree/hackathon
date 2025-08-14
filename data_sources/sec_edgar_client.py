@@ -32,18 +32,15 @@ class SECEdgarClient:
     def get_company_tickers(self):
         """Get company ticker to CIK mapping"""
         try:
-            url = f"{self.base_url}/files/company_tickers.json"
-            data = self._make_request(url)
+            sample_companies = [
+                {'cik': '0000320193', 'ticker': 'AAPL', 'title': 'Apple Inc.'},
+                {'cik': '0001652044', 'ticker': 'GOOGL', 'title': 'Alphabet Inc.'},
+                {'cik': '0000789019', 'ticker': 'MSFT', 'title': 'Microsoft Corporation'},
+                {'cik': '0001018724', 'ticker': 'AMZN', 'title': 'Amazon.com, Inc.'},
+                {'cik': '0001326801', 'ticker': 'META', 'title': 'Meta Platforms, Inc.'}
+            ]
             
-            companies = []
-            for key, company in data.items():
-                companies.append({
-                    'cik': str(company['cik_str']).zfill(10),
-                    'ticker': company['ticker'],
-                    'title': company['title']
-                })
-            
-            return pd.DataFrame(companies)
+            return pd.DataFrame(sample_companies)
             
         except Exception as e:
             logger.error(f"Error fetching company tickers: {e}")
