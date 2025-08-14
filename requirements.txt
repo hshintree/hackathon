@@ -63,6 +63,7 @@ click
 rich
 loguru
 schedule
+tqdm
 
 # Testing & Development
 pytest
@@ -82,6 +83,7 @@ torch
 stable-baselines3
 tensorboard
 gymnasium
+transformers
 
 # Optimization
 cvxpy

@@ -95,6 +95,60 @@ class DocumentEmbeddings(Base):
     meta_data = Column(JSON)
     created_at = Column(DateTime, nullable=False)
 
+class OptionsContract(Base):
+    __tablename__ = 'options_contracts'
+    
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(32), nullable=False, unique=True, index=True)
+    root_symbol = Column(String(20), index=True)
+    underlying_symbol = Column(String(20), index=True)
+    expiration_date = Column(DateTime, index=True)
+    option_type = Column(String(8), index=True)
+    strike_price = Column(Float, index=True)
+    style = Column(String(20))
+    size = Column(Integer)
+    status = Column(String(20))
+    tradable = Column(Boolean)
+    open_interest = Column(Float)
+    open_interest_date = Column(DateTime)
+    close_price = Column(Float)
+    close_price_date = Column(DateTime)
+    meta_data = Column(JSON)
+
+class OptionsBar(Base):
+    __tablename__ = 'options_bars'
+    
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String(32), nullable=False, index=True)
+    timestamp = Column(DateTime, nullable=False, index=True)
+    timeframe = Column(String(16), nullable=False)
+    source = Column(String(20), nullable=False)
+    open_price = Column(Float)
+    high_price = Column(Float)
+    low_price = Column(Float)
+    close_price = Column(Float)
+    volume = Column(Float)
+    trade_count = Column(Integer)
+    vwap = Column(Float)
+
+class NewsArticle(Base):
+    __tablename__ = 'news_articles'
+    
+    id = Column(Integer, primary_key=True)
+    source = Column(String(20), nullable=False, index=True)
+    symbol = Column(String(20), index=True)
+    headline = Column(Text)
+    summary = Column(Text)
+    url = Column(String(500))
+    publisher = Column(String(200))
+    author = Column(String(200))
+    published_at = Column(DateTime, index=True)
+    sentiment_score = Column(Float)
+    sentiment_label = Column(String(20))
+    raw = Column(JSON)
+    created_at = Column(DateTime)
+
+
 def get_database_url():
     """Get database URL from environment variables"""
     db_host = os.getenv('DB_HOST', 'localhost')
@@ -104,6 +158,7 @@ def get_database_url():
     db_password = os.getenv('DB_PASSWORD', 'postgres')
     
     return f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+
 
 def create_database_engine():
     """Create database engine with connection pooling"""
@@ -117,9 +172,11 @@ def create_database_engine():
     )
     return engine
 
+
 def create_tables(engine):
     """Create all tables in the database"""
     Base.metadata.create_all(engine)
+
 
 def get_session_maker(engine):
     """Get session maker for database operations"""
