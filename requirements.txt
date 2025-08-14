@@ -107,3 +107,6 @@ arch
 prophet
 pmdarima
 alpaca-trade-api
+
+langgraph
+cohere

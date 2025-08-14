@@ -23,11 +23,15 @@ import os
 from typing import List, Dict, Any
 import uvicorn
 
+from agents.langgraph_agent import build_graph
+
 app = FastAPI(
     title="Autonomous Trading Agent API",
     description="REST API for the autonomous trading agent",
     version="1.0.0",
 )
+
+graph = build_graph()
 
 
 class StockRequest(BaseModel):
@@ -73,6 +77,19 @@ async def health_check():
         "database_connected": database_connected,
         "modal_available": True
     }
+
+
+class AgentChatRequest(BaseModel):
+    query: str
+
+
+@app.post("/agent/chat")
+async def agent_chat(request: AgentChatRequest):
+    try:
+        state = await graph.ainvoke({"query": request.query})
+        return {"state": state}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/market-data")

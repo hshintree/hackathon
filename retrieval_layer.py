@@ -217,6 +217,25 @@ def rerank_cross_encoder(query: str, candidates: List[Dict[str, Any]], model_nam
 	return sorted(candidates, key=lambda x: x.get("rerank_score", 0.0), reverse=True)[:top_k]
 
 
+def rerank_with_cohere(query: str, candidates: List[Dict[str, Any]], top_k: int = 20) -> List[Dict[str, Any]]:
+	"""Use Cohere Rerank 3.5 if COHERE_API_KEY is available; otherwise return candidates sliced."""
+	import os
+	api_key = os.getenv("COHERE_API_KEY")
+	if not api_key or not candidates:
+		return candidates[:top_k]
+	try:
+		from cohere import Client
+		co = Client(api_key)
+		docs = [c.get("content", "")[:4000] for c in candidates]
+		r = co.rerank(query=query, documents=docs, top_n=min(top_k, len(docs)), model="rerank-3.5")
+		for item in r.results:
+			idx = item.index
+			candidates[idx]["rerank_score"] = float(item.relevance_score)
+	except Exception:
+		return candidates[:top_k]
+	return sorted(candidates, key=lambda x: x.get("rerank_score", 0.0), reverse=True)[:top_k]
+
+
 def retrieve(query: str, top_k: int = 20, alpha: float = 0.5, use_bm25: bool = False, pool_n: int = 200, rerank: bool = False, rerank_model: str = "BAAI/bge-reranker-large", sources: Optional[List[str]] = None, dedup: bool = True) -> List[Dict[str, Any]]:
 	"""End-to-end retrieval: dense-only by default for speed; optional hybrid and re-rank.
 	Optionally filter by sources (e.g., ["sec"], ["news"]) and deduplicate per document_id.
@@ -230,7 +249,10 @@ def retrieve(query: str, top_k: int = 20, alpha: float = 0.5, use_bm25: bool = F
 	if dedup or sources:
 		pool = _dedup_by_docid(pool, allowed_sources=sources)
 	if rerank:
-		pool = rerank_cross_encoder(query, pool, model_name=rerank_model, top_k=top_k)
+		if isinstance(rerank_model, str) and rerank_model.lower().startswith("cohere"):
+			pool = rerank_with_cohere(query, pool, top_k=top_k)
+		else:
+			pool = rerank_cross_encoder(query, pool, model_name=rerank_model, top_k=top_k)
 	return pool[:top_k]
 
 
