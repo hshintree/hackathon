@@ -13,8 +13,8 @@ def handle_intent(intent: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 		k = int(payload.get("top_k", 20))
 		alpha = float(payload.get("alpha", 0.5))
 		return {"results": search_text(q, top_k=k, alpha=alpha)}
-	if intent == "get_doc":
-		cid = int(payload.get("chunk_id"))
+	if intent in ("get_doc", "get_chunk"):
+		cid = int(payload.get("chunk_id") or payload.get("id"))
 		return {"doc": get_doc(cid)}
 	if intent == "run_backtest":
 		return run_backtest(payload.get("params",{}), payload.get("universe",[]), payload.get("start"), payload.get("end"))

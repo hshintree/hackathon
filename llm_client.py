@@ -12,7 +12,14 @@ def get_openai() -> OpenAI:
 
 
 def chat(messages: List[Dict[str, str]], model: Optional[str] = None, **kwargs) -> str:
-	client = get_openai()
-	m = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-	resp = client.chat.completions.create(model=m, messages=messages, **kwargs)
-	return resp.choices[0].message.content or "" 
+	# If no credentials configured, return empty to trigger rule-based planning
+	if not (os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_BASE_URL")):
+		return ""
+	try:
+		client = get_openai()
+		m = model or os.getenv("OPENAI_PLANNER_MODEL") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+		resp = client.chat.completions.create(model=m, messages=messages, **kwargs)
+		return resp.choices[0].message.content or ""
+	except Exception:
+		# Swallow errors and let callers use rule-based fallback
+		return "" 

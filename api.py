@@ -41,6 +41,9 @@ app.add_middleware(
 
 graph = build_graph()
 
+# Global mock toggle
+MOCK_MODE = False
+
 # WebSocket connection manager
 class ConnectionManager:
     def __init__(self):
@@ -460,21 +463,7 @@ async def get_system_status():
 async def get_portfolio_pnl():
     """Get real-time P&L calculations"""
     try:
-        # Mock data for now - replace with real Alpaca portfolio data
-        portfolio_data = {
-            "totalPnL": 1250.75,
-            "unrealizedPnL": 850.25,
-            "realizedPnL": 400.50,
-            "totalValue": 25000.00,
-            "dailyChange": 125.75,
-            "dailyChangePercent": 0.51,
-            "positions": [
-                {"symbol": "AAPL", "quantity": 10, "avgPrice": 150.00, "currentPrice": 155.25, "pnl": 52.50},
-                {"symbol": "TSLA", "quantity": 5, "avgPrice": 200.00, "currentPrice": 210.00, "pnl": 50.00}
-            ]
-        }
-        
-        return portfolio_data
+        raise HTTPException(status_code=501, detail="Portfolio PnL requires real integration")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
