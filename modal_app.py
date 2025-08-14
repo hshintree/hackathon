@@ -12,26 +12,32 @@ app = modal.App("trading-agent-data")
 volume = modal.Volume.from_name("trading-data", create_if_missing=True)
 secrets = modal.Secret.from_name("trading-secrets")
 
-image = modal.Image.debian_slim().pip_install([
-    "alpaca-py",
-    "pandas",
-    "numpy",
-    "scipy",
-    "requests",
-    "websockets",
-    "psycopg2-binary",
-    "pgvector",
-    "pyarrow",
-    "fastapi",
-    "pydantic",
-    # ML / NLP
-    "transformers",
-    "sentence-transformers",
-    "torch",
-    "beautifulsoup4",
-    # Portfolio optimization
-    "pypfopt",
-])
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .run_commands("python -m pip install --upgrade pip setuptools wheel")
+    .pip_install([
+        "alpaca-py",
+        "pandas",
+        "numpy<2.0.0",
+        "scipy",
+        "requests",
+        "websockets==12.0",
+        "psycopg2-binary",
+        "pgvector",
+        "pyarrow",
+        "fastapi",
+        "pydantic",
+        # ML / NLP
+        "transformers",
+        "sentence-transformers",
+        "torch",
+        "beautifulsoup4",
+        # Portfolio optimization (installed via git below)
+        # "pypfopt",
+    ])
+    .apt_install(["git"])
+    .run_commands("python -m pip install git+https://github.com/robertmartin8/PyPortfolioOpt.git || true")
+)
 
 @app.function(image=image, secrets=[secrets], timeout=600)
 def embed_texts_384(texts: list, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> list:
@@ -311,7 +317,7 @@ def query_graph_index(query: str, top_k: int = 20) -> dict:
 
 # ---------- Web endpoints ----------
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
 def trigger_market_data_ingestion(request_data: dict):
     """Web endpoint to trigger market data ingestion"""
     symbols = request_data.get("symbols", ["AAPL", "GOOGL", "MSFT"])
@@ -321,7 +327,7 @@ def trigger_market_data_ingestion(request_data: dict):
     job = ingest_market_data.spawn(symbols, start_date, end_date)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
 def trigger_sec_ingestion(request_data: dict):
     """Web endpoint to trigger SEC filings ingestion"""
     cik_list = request_data.get("cik_list")
@@ -330,7 +336,7 @@ def trigger_sec_ingestion(request_data: dict):
     job = ingest_sec_filings.spawn(cik_list, forms)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
 def trigger_macro_ingestion(request_data: dict):
     """Web endpoint to trigger macro data ingestion"""
     series_ids = request_data.get("series_ids", ["GDP", "UNRATE", "CPIAUCSL"])
@@ -340,7 +346,7 @@ def trigger_macro_ingestion(request_data: dict):
     job = ingest_macro_data.spawn(series_ids, start_date, end_date)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
 def trigger_crypto_ingestion(request_data: dict):
     """Web endpoint to trigger crypto data ingestion"""
     symbols = request_data.get("symbols", ["BTCUSDT", "ETHUSDT"])
@@ -349,14 +355,16 @@ def trigger_crypto_ingestion(request_data: dict):
     job = ingest_crypto_data.spawn(symbols, duration_hours)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
+@modal.web_endpoint(method="POST")
 def trigger_graph_build(request_data: dict):
     """Web endpoint to trigger GraphRAG index build"""
     limit = request_data.get("limit")
     job = build_graph_index.spawn(limit)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
+@modal.web_endpoint(method="POST")
 def query_graph(request_data: dict):
     """Web endpoint to query GraphRAG index with a text query"""
     q = request_data.get("query", "")
@@ -504,7 +512,8 @@ def optimize_portfolio_advanced(price_payload: dict, method: str = "HRP", constr
 
 # ---------- Web endpoints for compute ----------
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
+@modal.web_endpoint(method="POST")
 def run_grid_scan(request_data: dict):
     param_grid = request_data.get("param_grid", {"ma_short": [10,20,30], "ma_long": [50,100]})
     price_payload = request_data.get("price_payload")
@@ -512,7 +521,8 @@ def run_grid_scan(request_data: dict):
     job = grid_scan_parent_mapreduce.spawn(param_grid, price_payload, shard_size)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
+@modal.web_endpoint(method="POST")
 def run_var(request_data: dict):
     price_payload = request_data.get("price_payload")
     alpha = float(request_data.get("alpha", 0.95))
@@ -521,7 +531,8 @@ def run_var(request_data: dict):
     job = var_mc.spawn(price_payload, alpha, horizon_days, paths)
     return {"job_id": job.object_id, "status": "started"}
 
-@app.web_endpoint(method="POST")
+@app.function(image=image, secrets=[secrets], volumes={"/data": volume}, timeout=600)
+@modal.web_endpoint(method="POST")
 def run_optimize(request_data: dict):
     price_payload = request_data.get("price_payload")
     method = request_data.get("method", "HRP")
