@@ -44,6 +44,20 @@ python database/connection.py
 
 echo "🔧 Setting up environment..."
 export PYTHONPATH=$(pwd):$PYTHONPATH
+
+echo "   Loading database environment variables..."
+if [ -f ".env" ]; then
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+    echo "   ✅ Database credentials loaded: DB_HOST=$DB_HOST, DB_NAME=$DB_NAME"
+else
+    echo "   ⚠️  .env file not found - using defaults"
+    export DB_HOST=localhost
+    export DB_PORT=5432
+    export DB_NAME=trading_agent
+    export DB_USER=postgres
+    export DB_PASSWORD=Y2RUH53T
+fi
+
 export USE_MODAL=1
 
 echo "🤖 Starting MCP services..."
