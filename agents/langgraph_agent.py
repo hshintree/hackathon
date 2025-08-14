@@ -8,12 +8,6 @@ from graph_rag import search_graph as _search_graph
 import pandas as pd
 import numpy as np
 
-LIB_URL = os.getenv("MCP_LIBRARIAN_URL", "http://localhost:8001")
-DATA_URL = os.getenv("MCP_DATA_URL", "http://localhost:8002")
-QUANT_URL = os.getenv("MCP_QUANT_URL", "http://localhost:8003")
-RISK_URL = os.getenv("MCP_RISK_URL", "http://localhost:8004")
-ALLOC_URL = os.getenv("MCP_ALLOC_URL", "http://localhost:8005")
-
 MODAL_GRID_SCAN_URL = "https://hshindy--trading-agent-data-run-grid-scan.modal.run"
 MODAL_VAR_URL = "https://hshindy--trading-agent-data-run-var.modal.run"
 MODAL_OPTIMIZE_URL = "https://hshindy--trading-agent-data-run-optimize.modal.run"
@@ -31,14 +25,6 @@ class AgentState(TypedDict, total=False):
 	error: Optional[str]
 
 
-async def call_tool(url: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-	try:
-		async with httpx.AsyncClient(timeout=10.0) as client:
-			r = await client.post(f"{url}{path}", json=payload)
-			r.raise_for_status()
-			return r.json()
-	except Exception as e:
-		return create_fallback_response(path, payload, str(e))
 
 def create_fallback_response(path: str, payload: Dict[str, Any], error: str) -> Dict[str, Any]:
 	if "/search_corpus" in path:
@@ -467,4 +453,4 @@ def build_graph():
 	g.add_edge("quant", END)
 	g.add_edge("risk", END)
 	g.add_edge("alloc", END)
-	return g.compile()          
+	return g.compile()            

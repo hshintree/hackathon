@@ -73,7 +73,7 @@ if curl -s http://localhost:8080/health > /dev/null; then
     echo "✅ Backend is healthy"
 else
     echo "❌ Backend health check failed"
-    kill $BACKEND_PID $MCP_LIBRARIAN_PID $MCP_QUANT_PID $MCP_RISK_PID $MCP_ALLOCATOR_PID 2>/dev/null
+    kill $BACKEND_PID 2>/dev/null
     exit 1
 fi
 
@@ -115,8 +115,6 @@ cleanup() {
     echo ""
     echo "🛑 Shutting down system..."
     kill $BACKEND_PID $FRONTEND_PID 2>/dev/null
-    echo "   Stopping Docker containers..."
-    docker-compose down
     echo "✅ System stopped"
     exit 0
 }
