@@ -133,27 +133,24 @@ def test_data_storage():
     
     try:
         from database.storage import DataStorage
-        from database.schema import get_session_maker, create_database_engine
+        import pandas as pd
         
-        engine = create_database_engine()
-        SessionMaker = get_session_maker(engine)
-        storage = DataStorage(SessionMaker)
+        storage = DataStorage()
         
-        test_data = [{
+        test_data = pd.DataFrame([{
             'symbol': 'TEST',
             'timestamp': datetime.now(),
-            'source': 'test',
-            'open_price': 100.0,
-            'high_price': 105.0,
-            'low_price': 95.0,
-            'close_price': 102.0,
+            'open': 100.0,
+            'high': 105.0,
+            'low': 95.0,
+            'close': 102.0,
             'volume': 1000.0
-        }]
+        }])
         
-        storage.store_market_data(test_data)
+        storage.store_market_data(test_data, source='test')
         print("✅ Market data storage successful")
         
-        retrieved = storage.get_market_data('TEST', limit=1)
+        retrieved = storage.get_market_data(['TEST'], datetime.now() - timedelta(hours=1), datetime.now() + timedelta(hours=1))
         if len(retrieved) > 0:
             print("✅ Market data retrieval successful")
             return True
