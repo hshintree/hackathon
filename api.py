@@ -7,10 +7,6 @@ Provides REST API endpoints for the trading agent.
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from data_sources.alpaca_client import AlpacaClient
-from data_sources.sec_edgar_client import SECEdgarClient
-from data_sources.fred_client import FREDClient
-from data_sources.binance_client import BinanceClient
 from database.storage import DataStorage
 from database.models import (
     MarketDataRequest, SECFilingRequest, MacroDataRequest, 
@@ -106,6 +102,8 @@ async def agent_chat(request: AgentChatRequest):
 async def get_market_data(request: StockRequest):
     """Fetch market data for given symbols"""
     try:
+        # Deferred imports for external clients to avoid startup failures if SDKs are missing
+        from data_sources.alpaca_client import AlpacaClient
         client = AlpacaClient()
         symbols_str = ",".join(request.symbols) if len(request.symbols) > 1 else request.symbols[0]
         df = client.get_market_data_for_symbol(symbols_str, request.period)
@@ -282,25 +280,29 @@ async def get_data_sources():
     sources = []
     
     try:
-        client = AlpacaClient()
+        # Deferred imports for external clients to avoid startup failures if SDKs are missing
+        from data_sources.alpaca_client import AlpacaClient
         sources.append(DataSourceStatus(source=DataSource.ALPACA, available=True))
     except Exception as e:
         sources.append(DataSourceStatus(source=DataSource.ALPACA, available=False, error_message=str(e)))
     
     try:
-        client = SECEdgarClient()
+        # Deferred imports for external clients to avoid startup failures if SDKs are missing
+        from data_sources.sec_edgar_client import SECEdgarClient
         sources.append(DataSourceStatus(source=DataSource.SEC_EDGAR, available=True))
     except Exception as e:
         sources.append(DataSourceStatus(source=DataSource.SEC_EDGAR, available=False, error_message=str(e)))
     
     try:
-        client = FREDClient()
+        # Deferred imports for external clients to avoid startup failures if SDKs are missing
+        from data_sources.fred_client import FREDClient
         sources.append(DataSourceStatus(source=DataSource.FRED, available=True))
     except Exception as e:
         sources.append(DataSourceStatus(source=DataSource.FRED, available=False, error_message=str(e)))
     
     try:
-        client = BinanceClient()
+        # Deferred imports for external clients to avoid startup failures if SDKs are missing
+        from data_sources.binance_client import BinanceClient
         sources.append(DataSourceStatus(source=DataSource.BINANCE, available=True))
     except Exception as e:
         sources.append(DataSourceStatus(source=DataSource.BINANCE, available=False, error_message=str(e)))
