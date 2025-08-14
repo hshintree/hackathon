@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Startup script for the Autonomous Trading Agent
-Runs both the FastAPI backend and Streamlit frontend
+Runs both the FastAPI backend and Next.js frontend
 """
 
 import subprocess
@@ -15,17 +15,39 @@ from pathlib import Path
 def check_dependencies():
     """Check if all required packages are installed"""
     try:
-        import streamlit
         import fastapi
         import uvicorn
         import yfinance
 
-        print("✅ All dependencies are installed")
+        print("✅ All Python dependencies are installed")
         return True
     except ImportError as e:
-        print(f"❌ Missing dependency: {e}")
+        print(f"❌ Missing Python dependency: {e}")
         print("Please run: pip install -r requirements.txt")
         return False
+
+
+def check_node_dependencies():
+    """Check if Node.js dependencies are installed"""
+    my_app_path = Path(__file__).parent / "my-app"
+    package_json = my_app_path / "package.json"
+    node_modules = my_app_path / "node_modules"
+    
+    if not package_json.exists():
+        print("❌ my-app/package.json not found")
+        return False
+    
+    if not node_modules.exists():
+        print("⚠️  Node.js dependencies not installed")
+        print("Installing Node.js dependencies...")
+        try:
+            subprocess.run(["npm", "install"], cwd=my_app_path, check=True)
+            print("✅ Node.js dependencies installed")
+        except subprocess.CalledProcessError:
+            print("❌ Failed to install Node.js dependencies")
+            return False
+    
+    return True
 
 
 def check_environment():
@@ -53,7 +75,7 @@ def check_environment():
 
 
 def start_services():
-    """Start both FastAPI and Streamlit services"""
+    """Start both FastAPI and Next.js services"""
     print("🚀 Starting Autonomous Trading Agent...")
 
     # Start FastAPI backend
@@ -70,30 +92,20 @@ def start_services():
     # Wait a moment for API to start
     time.sleep(3)
 
-    # Start Streamlit frontend
-    print("🎨 Starting Streamlit dashboard on http://localhost:8501")
-    streamlit_process = subprocess.Popen(
-        [
-            "streamlit",
-            "run",
-            "app.py",
-            "--server.port",
-            "8501",
-            "--server.address",
-            "0.0.0.0",
-            "--server.headless",
-            "true",
-            "--browser.gatherUsageStats",
-            "false",
-        ],
-        cwd=Path(__file__).parent,
+    # Start Next.js frontend
+    print("🎨 Starting Next.js dashboard on http://localhost:3000")
+    my_app_path = Path(__file__).parent / "my-app"
+    nextjs_process = subprocess.Popen(
+        ["npm", "run", "dev"],
+        cwd=my_app_path,
+        env={**os.environ, "PORT": "3000"}
     )
 
     print("\n" + "=" * 60)
     print("🤖 AUTONOMOUS TRADING AGENT IS RUNNING!")
     print("=" * 60)
-    print("📊 Dashboard: http://localhost:8501")
-    print("📡 API: http://localhost:8080")
+    print("🎨 Next.js Dashboard: http://localhost:3000")
+    print("📡 FastAPI Backend: http://localhost:8080")
     print("📚 API Docs: http://localhost:8080/docs")
     print("=" * 60)
     print("Press Ctrl+C to stop all services")
@@ -102,7 +114,7 @@ def start_services():
     def signal_handler(sig, frame):
         print("\n🛑 Shutting down services...")
         api_process.terminate()
-        streamlit_process.terminate()
+        nextjs_process.terminate()
         print("✅ All services stopped")
         sys.exit(0)
 
@@ -111,7 +123,7 @@ def start_services():
     try:
         # Wait for processes
         api_process.wait()
-        streamlit_process.wait()
+        nextjs_process.wait()
     except KeyboardInterrupt:
         signal_handler(None, None)
 
@@ -121,6 +133,9 @@ def main():
     print("🧪 Checking system requirements...")
 
     if not check_dependencies():
+        sys.exit(1)
+
+    if not check_node_dependencies():
         sys.exit(1)
 
     check_environment()
